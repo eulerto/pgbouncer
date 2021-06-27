@@ -936,6 +936,10 @@ int main(int argc, char *argv[])
 	admin_setup();
 
 	if (cf_reboot) {
+#ifdef WIN32
+		die("option --reboot (-R) is not supported on this platform");
+#endif
+
 		if (check_old_process_unix()) {
 			takeover_part1();
 			did_takeover = true;
