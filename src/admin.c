@@ -864,6 +864,7 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 	usec_t max_wait;
 	struct CfValue cv;
 	int pool_mode;
+	char timebuf[64];
 
 	cv.extra = pool_mode_map;
 	cv.value_p = &pool_mode;
@@ -872,6 +873,7 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 		admin_error(admin, "no mem");
 		return true;
 	}
+	format_time_ms(0, timebuf, sizeof(timebuf));
 	pktbuf_write_RowDescription(buf, "ssiiiiiiiiiiiiis",
 				    "database", "user",
 				    "cl_active", "cl_waiting",
@@ -883,13 +885,14 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 				    "sv_idle",
 				    "sv_used", "sv_tested",
 				    "sv_login", "maxwait",
-				    "maxwait_us", "pool_mode");
+				    "maxwait_us", "pool_mode",
+					"timestamp");
 	statlist_for_each(item, &pool_list) {
 		pool = container_of(item, PgPool, head);
 		waiter = first_socket(&pool->waiting_client_list);
 		max_wait = (waiter && waiter->query_start) ? now - waiter->query_start : 0;
 		pool_mode = pool_pool_mode(pool);
-		pktbuf_write_DataRow(buf, "ssiiiiiiiiiiiiis",
+		pktbuf_write_DataRow(buf, "ssiiiiiiiiiiiiiss",
 				     pool->db->name, pool->user->name,
 				     statlist_count(&pool->active_client_list),
 				     statlist_count(&pool->waiting_client_list),
@@ -905,7 +908,8 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 					/* how long is the oldest client waited */
 				     (int)(max_wait / USEC),
 				     (int)(max_wait % USEC),
-				     cf_get_lookup(&cv));
+				     cf_get_lookup(&cv),
+					 timebuf);
 	}
 	admin_flush(admin, buf, "SHOW");
 	return true;
