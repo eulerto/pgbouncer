@@ -1008,6 +1008,11 @@ static bool decide_startup_pool(PgSocket *client, PktHdr *pkt)
 		PktBuf *buf = pktbuf_dynamic(512);
 		int res;
 
+		if (!buf) {
+			disconnect_client(client, false, "out of memory");
+			return false;
+		}
+
 		pktbuf_write_NegotiateProtocolVersion(
 			buf,
 			unsupported_protocol_extensions_count,
