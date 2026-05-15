@@ -1,0 +1,476 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  LANG: C
+  PGVERSION: "16"
+
+jobs:
+  linux-debian-ubuntu:
+    name: Linux (Debian/Ubuntu) - ${{ matrix.label }}
+    runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
+    container:
+      image: ${{ matrix.image }}
+      options: --cap-add=NET_ADMIN --cap-add=NET_RAW
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ubuntu-22.04-cares-pam-ldap
+            image: ubuntu:22.04
+            configure_args: "--with-cares --with-pam --with-ldap"
+            pgversion: "16"
+          - label: ubuntu-22.04-no-evdns-no-openssl
+            image: ubuntu:22.04
+            configure_args: "--disable-evdns --without-openssl"
+            pgversion: "16"
+          - label: ubuntu-22.04-valgrind-pg17
+            image: ubuntu:22.04
+            cflags: "-O0 -g"
+            enable_valgrind: "yes"
+            pgversion: "17"
+    env:
+      CFLAGS: ${{ matrix.cflags }}
+      ENABLE_VALGRIND: ${{ matrix.enable_valgrind }}
+      configure_args: ${{ matrix.configure_args }}
+      use_scan_build: ${{ matrix.use_scan_build }}
+      PGVERSION: ${{ matrix.pgversion }}
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get -y --no-install-recommends install ca-certificates git
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          apt-get -y --no-install-recommends install gnupg postgresql-common
+          /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          apt-get update
+          pkgs="autoconf automake cpio iptables ldap-utils libc-ares-dev libevent-dev libldap-dev libpam0g-dev libssl-dev libsystemd-dev libtool make pandoc pkg-config postgresql-$PGVERSION python3 python3-pip python3-venv slapd socat sudo"
+          case $CC in clang) pkgs="$pkgs clang";; esac
+          if [ x"$ENABLE_VALGRIND" = x"yes" ]; then pkgs="$pkgs valgrind"; fi
+          if [ x"$use_scan_build" = x"yes" ]; then pkgs="$pkgs clang-tools"; fi
+          apt-get -y --no-install-recommends install $pkgs
+          python3 -m venv /venv
+          /venv/bin/pip install -r requirements.txt
+          useradd user
+          chown -R user .
+          echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          echo $PWD
+          ls -a
+      - name: Build
+        run: |
+          su user -c "./autogen.sh"
+          su user -c "${use_scan_build:+scan-build} ./configure --prefix=$HOME/install --enable-cassert --enable-werror --without-cares --with-systemd $configure_args"
+          su user -c "${use_scan_build:+scan-build} make -j4"
+      - name: Test
+        run: |
+          . /venv/bin/activate
+          su user -c "PATH=/usr/lib/postgresql/${PGVERSION}/bin:$PATH make -j4 check CONCURRENCY=4"
+      - name: Install
+        run: make -j4 install
+      - name: Dist
+        run: |
+          su user -c "echo $PWD"  # debug
+          su user -c "ls -a"      # debug
+          su user -c "make dist"
+          PACKAGE_VERSION=$(sed -n 's/PACKAGE_VERSION = //p' config.mak)
+          su user -c "tar -x -v -f pgbouncer-${PACKAGE_VERSION}.tar.gz"
+          su user -c "cd pgbouncer-${PACKAGE_VERSION}/ && ./configure --prefix=$HOME/install2 --enable-werror --without-cares $configure_args && make -j4"
+          (cd pgbouncer-${PACKAGE_VERSION}/ && make -j4 install)
+      - name: Upload tarball
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.label }}
+          path: pgbouncer-*.tar.gz
+          if-no-files-found: ignore
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-debian-ubuntu-${{ matrix.label }}
+          path: config.log
+          if-no-files-found: ignore
+
+  linux-debian-ubuntu-manual:
+    name: Linux (Debian/Ubuntu manual) - ${{ matrix.label }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runs-on || 'ubuntu-latest' }}
+    container:
+      image: ${{ matrix.image }}
+      options: --cap-add=NET_ADMIN --cap-add=NET_RAW
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ubuntu-22.04-default
+            image: ubuntu:22.04
+            pgversion: "16"
+          - label: ubuntu-22.04-sanitize
+            image: ubuntu:22.04
+            cflags: "-fno-sanitize-recover=all -fsanitize=undefined -fsanitize-address-use-after-scope -fno-sanitize=shift"
+            pgversion: "16"
+          - label: ubuntu-22.04-scan-build
+            image: ubuntu:22.04
+            use_scan_build: "yes"
+            pgversion: "16"
+          - label: ubuntu-22.04-arm
+            image: ubuntu:22.04
+            pgversion: "16"
+            runs-on: ubuntu-22.04-arm
+          - label: ubuntu-24.04
+            image: ubuntu:24.04
+            pgversion: "16"
+          - label: debian-bookworm-pg15
+            image: debian:bookworm
+            pgversion: "15"
+          - label: debian-bullseye-pg13
+            image: debian:bullseye
+            pgversion: "13"
+    env:
+      CFLAGS: ${{ matrix.cflags }}
+      ENABLE_VALGRIND: ${{ matrix.enable_valgrind }}
+      configure_args: ${{ matrix.configure_args }}
+      use_scan_build: ${{ matrix.use_scan_build }}
+      PGVERSION: ${{ matrix.pgversion }}
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get -y --no-install-recommends install ca-certificates git
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          apt-get -y --no-install-recommends install gnupg postgresql-common
+          /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          apt-get update
+          pkgs="autoconf automake cpio iptables ldap-utils libc-ares-dev libevent-dev libldap-dev libpam0g-dev libssl-dev libsystemd-dev libtool make pandoc pkg-config postgresql-$PGVERSION python3 python3-pip python3-venv slapd socat sudo"
+          case $CC in clang) pkgs="$pkgs clang";; esac
+          if [ x"$ENABLE_VALGRIND" = x"yes" ]; then pkgs="$pkgs valgrind"; fi
+          if [ x"$use_scan_build" = x"yes" ]; then pkgs="$pkgs clang-tools"; fi
+          apt-get -y --no-install-recommends install $pkgs
+          python3 -m venv /venv
+          /venv/bin/pip install -r requirements.txt
+          useradd user
+          chown -R user .
+          echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+      - name: Build
+        run: |
+          su user -c "./autogen.sh"
+          su user -c "${use_scan_build:+scan-build} ./configure --prefix=$HOME/install --enable-cassert --enable-werror --without-cares --with-systemd $configure_args"
+          su user -c "${use_scan_build:+scan-build} make -j4"
+      - name: Test
+        run: |
+          . /venv/bin/activate
+          su user -c "PATH=/usr/lib/postgresql/${PGVERSION}/bin:$PATH make -j4 check CONCURRENCY=4"
+      - name: Install
+        run: make -j4 install
+      - name: Dist
+        run: |
+          su user -c "make dist"
+          PACKAGE_VERSION=$(sed -n 's/PACKAGE_VERSION = //p' config.mak)
+          su user -c "tar -x -v -f pgbouncer-${PACKAGE_VERSION}.tar.gz"
+          su user -c "cd pgbouncer-${PACKAGE_VERSION}/ && ./configure --prefix=$HOME/install2 --enable-werror --without-cares $configure_args && make -j4"
+          (cd pgbouncer-${PACKAGE_VERSION}/ && make -j4 install)
+      - name: Upload tarball
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.label }}
+          path: pgbouncer-*.tar.gz
+          if-no-files-found: ignore
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-debian-ubuntu-${{ matrix.label }}
+          path: config.log
+          if-no-files-found: ignore
+
+  linux-red-hat:
+    name: Linux (Red Hat) - ${{ matrix.label }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+      options: --cap-add=NET_ADMIN --cap-add=NET_RAW
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: rockylinux-9
+            image: rockylinux:9
+            configure_args: "--with-cares"
+          - label: rockylinux-8
+            image: rockylinux:8
+            configure_args: ""
+    env:
+      configure_args: ${{ matrix.configure_args }}
+    steps:
+      - name: Install git
+        run: dnf -y install git
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          dnf -y install 'dnf-command(config-manager)'
+          if grep -q -F 'release 9' /etc/redhat-release; then dnf config-manager --set-enabled "plus"; else dnf config-manager --set-enabled "powertools"; fi
+          dnf -y install autoconf automake diffutils file iptables libevent-devel libpq-devel libtool make openldap-clients openldap-devel openldap-servers openssl-devel pam-devel pkg-config postgresql-server postgresql-contrib python3 python3-pip socat sudo systemd-devel wget
+          case $configure_args in *with-cares*) dnf -y install c-ares-devel; esac
+          wget -O /tmp/pandoc.tar.gz https://github.com/jgm/pandoc/releases/download/2.10.1/pandoc-2.10.1-linux-amd64.tar.gz
+          tar xvzf /tmp/pandoc.tar.gz --strip-components 1 -C /usr/local/
+          if grep -q -F 'release 9' /etc/redhat-release; then dnf -y install python-unversioned-command; else dnf -y install python39 python39-pip && alternatives --set python /usr/bin/python3.9; fi
+          python -m pip install -r requirements.txt
+          useradd user
+          chown -R user .
+          echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+      - name: Build
+        run: |
+          su user -c "./autogen.sh"
+          su user -c "./configure --prefix=$HOME/install --enable-cassert --enable-werror --with-ldap --with-pam --with-systemd $configure_args"
+          su user -c "make -j4"
+      - name: Test
+        run: su user -c "make -j4 check CONCURRENCY=4"
+      - name: Install
+        run: make -j4 install
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-red-hat-${{ matrix.label }}
+          path: config.log
+          if-no-files-found: ignore
+
+  linux-alpine:
+    name: Linux (Alpine)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+      options: --cap-add=NET_ADMIN --cap-add=NET_RAW
+    steps:
+      - name: Install git
+        run: apk add --no-cache git
+        shell: sh
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          apk update
+          apk add autoconf automake build-base c-ares-dev iptables libevent-dev libtool openldap openldap-clients openldap-dev openssl openssl-dev pkgconf postgresql postgresql-contrib python3 py3-pip socat sudo wget
+          wget -O /tmp/pandoc.tar.gz https://github.com/jgm/pandoc/releases/download/2.10.1/pandoc-2.10.1-linux-amd64.tar.gz
+          tar xvzf /tmp/pandoc.tar.gz --strip-components 1 -C /usr/local/
+          python3 -m venv /venv
+          /venv/bin/pip install -r requirements.txt
+          adduser --disabled-password user
+          chown -R user .
+          echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+        shell: sh
+      - name: Build
+        run: |
+          su user -c "./autogen.sh"
+          su user -c "./configure --prefix=$HOME/install --enable-cassert --enable-werror --with-cares --with-ldap"
+          su user -c "make -j4"
+        shell: sh
+      - name: Test
+        run: |
+          . /venv/bin/activate
+          su user -c "make -j4 check CONCURRENCY=4"
+        shell: sh
+      - name: Install
+        run: make -j4 install
+        shell: sh
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-alpine
+          path: config.log
+          if-no-files-found: ignore
+
+  freebsd:
+    name: FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build and test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          envs: "PGVERSION"
+          usesh: true
+          prepare: |
+            pkg install -y autoconf automake gmake hs-pandoc libevent libtool openldap25-client openldap25-server pkgconf postgresql${PGVERSION}-server postgresql${PGVERSION}-contrib python devel/py-pip sudo
+            pip install -r requirements.txt
+            kldload pf
+            echo 'anchor "pgbouncer_test/*"' >> /etc/pf.conf
+            echo 'pf_enable="YES"' >> /etc/rc.conf
+            service pf start
+            pw useradd user
+            chown -R user .
+            echo 'user ALL=(ALL) NOPASSWD: ALL' >> /usr/local/etc/sudoers
+          run: |
+            export HAVE_IPV6_LOCALHOST=yes
+            export USE_SUDO=true
+            export CPPFLAGS=-I/usr/local/include
+            export LDFLAGS=-L/usr/local/lib
+            export M4=/usr/local/bin/gm4
+            su user -c "./autogen.sh"
+            su user -c "./configure --prefix=\$HOME/install --enable-werror --with-ldap"
+            su user -c "gmake -j4"
+            su user -c "gmake -j4 check CONCURRENCY=4"
+            gmake -j4 install
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-freebsd
+          path: config.log
+          if-no-files-found: ignore
+
+  macos:
+    name: macOS
+    runs-on: macos-14
+    env:
+      HAVE_IPV6_LOCALHOST: "yes"
+      USE_SUDO: "true"
+      CPPFLAGS: "-I/opt/homebrew/opt/openldap/include -I/opt/homebrew/opt/openssl@3/include"
+      LDFLAGS: "-L/opt/homebrew/opt/openldap/lib -L/opt/homebrew/opt/openssl@3/lib"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          brew install autoconf automake libevent libtool openldap openssl pandoc pkg-config postgresql@${PGVERSION}
+          python3 -m venv venv
+          venv/bin/pip install -r requirements.txt
+          echo 'anchor "pgbouncer_test/*"' | sudo tee -a /etc/pf.conf
+          sudo pfctl -f /etc/pf.conf
+          echo "/opt/homebrew/opt/postgresql@${PGVERSION}/bin" >> $GITHUB_PATH
+      - name: Build
+        run: |
+          ./autogen.sh
+          ./configure --prefix=$HOME/install --enable-werror --with-ldap
+          make -j4
+      - name: Test
+        run: |
+          . venv/bin/activate
+          make -j4 check CONCURRENCY=4
+      - name: Install
+        run: make -j4 install
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-macos
+          path: config.log
+          if-no-files-found: ignore
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    env:
+      HOME: "."
+      HAVE_IPV6_LOCALHOST: "yes"
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libevent
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-postgresql
+            autoconf
+            automake
+            libtool
+            pkg-config
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-python-pip
+            zip
+      - name: Install pip dependencies
+        run: pip install -r requirements.txt
+      - name: Install pandoc
+        shell: pwsh
+        run: choco install -y --no-progress pandoc
+      - name: Configure hosts (Windows)
+        shell: pwsh
+        run: Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 localhost"
+      - name: Configure hosts (MSYS2)
+        run: echo "127.0.0.1   localhost" >> /etc/hosts
+      - name: Build
+        run: |
+          ./autogen.sh
+          ./configure --prefix=$HOME/install --enable-werror PANDOC=/c/programdata/chocolatey/bin/pandoc LDFLAGS=-static "LIBS=-liphlpapi $(pkgconf -libs -static openssl)" PKG_CONFIG='pkg-config --static'
+          make -j4
+      - name: Test
+        run: |
+          make -j4 check CONCURRENCY=3
+          windres pgbouncer.exe
+      - name: Install
+        run: make -j4 install
+      - name: Dist
+        run: make -j4 zip
+      - name: Upload zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgbouncer-zip-windows
+          path: pgbouncer-*.zip
+          if-no-files-found: ignore
+      - name: Upload config.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log-windows
+          path: config.log
+          if-no-files-found: ignore
+
+  formatting:
+    name: Formatting checks & linting
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get -y --no-install-recommends install ca-certificates git
+          git config --system --add safe.directory '*'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup
+        run: |
+          apt-get install -y --no-install-recommends python3 python3-pip cmake curl gcc g++ make
+          pip install -r dev_requirements.txt
+      - name: Build
+        run: touch config.mak
+      - name: Test
+        run: |
+          make format-check
+          make lint
