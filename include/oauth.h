@@ -106,11 +106,15 @@ typedef struct OAuthValidatorCallbacks {
  */
 #define OAUTH_MAX_TOKEN 8192
 
+/* Maximum sizes for the effective issuer and scope strings. */
+#define OAUTH_MAX_ISSUER 512
+#define OAUTH_MAX_SCOPE 512
+
 /* Symbol every validator module must export. */
 #define OAUTH_VALIDATOR_INIT_SYMBOL "_pgbouncer_oauth_validator_module_init"
 
 /*
- * Type of the shared library symbol _pgbouncer_oauth_validatror_init which is
+ * Type of the shared library symbol OAUTH_VALIDATOR_INIT_SYMBOL which is
  * required for all validator modules. This function will be invoked during
  * module loading.
  */

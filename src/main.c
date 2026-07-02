@@ -894,6 +894,7 @@ static void main_loop_once(void)
 	}
 	ldap_poll();
 	pam_poll();
+	oauth_poll();
 	per_loop_maint();
 	reuse_just_freed_objects();
 	rescue_timers();
@@ -1109,6 +1110,7 @@ int main(int argc, char *argv[])
 
 	auth_ldap_init();
 	pam_init();
+	oauth_init();
 
 	pooler_setup();
 
