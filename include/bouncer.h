@@ -246,6 +246,7 @@ enum auth_type {
 	AUTH_TYPE_HBA,
 	AUTH_TYPE_LDAP,
 	AUTH_TYPE_PAM,
+	AUTH_TYPE_OAUTH,
 	AUTH_TYPE_SCRAM_SHA_256,
 	AUTH_TYPE_PEER,
 	AUTH_TYPE_REJECT,
@@ -893,6 +894,10 @@ extern char *cf_auth_user;
 extern char *cf_auth_hba_file;
 extern char *cf_auth_dbname;
 extern char *cf_auth_ldap_options;
+extern char *cf_oauth_validator_library;
+extern char *cf_oauth_issuer;
+extern char *cf_oauth_scope;
+extern int cf_oauth_delegate_ident_mapping;
 
 extern char *cf_pidfile;
 

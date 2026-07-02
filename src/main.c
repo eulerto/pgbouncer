@@ -126,6 +126,10 @@ char *cf_auth_ldap_options;
 char *cf_auth_user;
 char *cf_auth_query;
 char *cf_auth_dbname;
+char *cf_oauth_validator_library;
+char *cf_oauth_issuer;
+char *cf_oauth_scope;
+int cf_oauth_delegate_ident_mapping;
 char *cf_track_extra_parameters;
 
 int cf_max_client_conn;
@@ -231,6 +235,9 @@ static const struct CfLookup auth_type_map[] = {
 #ifdef HAVE_PAM
 	{ "pam", AUTH_TYPE_PAM },
 #endif
+#ifdef HAVE_OAUTH
+	{ "oauth", AUTH_TYPE_OAUTH },
+#endif
 	{ "scram-sha-256", AUTH_TYPE_SCRAM_SHA_256 },
 	{ NULL }
 };
@@ -311,6 +318,10 @@ static const struct CfKey bouncer_params [] = {
 	CF_ABS("max_user_client_connections", CF_INT, cf_max_user_client_connections, 0, "0"),
 	CF_ABS("max_user_connections", CF_INT, cf_max_user_connections, 0, "0"),
 	CF_ABS("min_pool_size", CF_INT, cf_min_pool_size, 0, "0"),
+	CF_ABS("oauth_delegate_ident_mapping", CF_INT, cf_oauth_delegate_ident_mapping, 0, "0"),
+	CF_ABS("oauth_issuer", CF_STR, cf_oauth_issuer, 0, NULL),
+	CF_ABS("oauth_scope", CF_STR, cf_oauth_scope, 0, NULL),
+	CF_ABS("oauth_validator_library", CF_STR, cf_oauth_validator_library, CF_NO_RELOAD, NULL),
 	CF_ABS("peer_id", CF_INT, cf_peer_id, 0, "0"),
 	CF_ABS("pidfile", CF_STR, cf_pidfile, CF_NO_RELOAD, ""),
 	CF_ABS("pkt_buf", CF_INT, cf_sbuf_len, CF_NO_RELOAD, "4096"),
@@ -454,9 +465,14 @@ static void set_peers_dead(bool flag)
 /* Tells if the specified auth type requires data from the auth file. */
 static bool requires_auth_file(int auth_type)
 {
-	/* For PAM authentication auth file is not used */
+	/* For PAM authentication the auth file is not used */
 	if (auth_type == AUTH_TYPE_PAM)
 		return false;
+	/*
+	 * cert and OAuth don't use the auth file for the client token, but it
+	 * still relies on it or auth_query for the server-side credential, so the
+	 * userlist must be loaded when present.
+	 */
 	return auth_type >= AUTH_TYPE_TRUST;
 }
 
@@ -995,6 +1011,9 @@ static void cleanup(void)
 	xfree(&cf_auth_dbname);
 	xfree(&cf_auth_hba_file);
 	xfree(&cf_auth_ldap_options);
+	xfree(&cf_oauth_validator_library);
+	xfree(&cf_oauth_issuer);
+	xfree(&cf_oauth_scope);
 	xfree(&cf_auth_query);
 	xfree(&cf_auth_user);
 	xfree(&cf_server_reset_query);

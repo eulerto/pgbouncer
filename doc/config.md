@@ -494,6 +494,16 @@ pam
     compatible with databases using the `auth_user` option. The service name reported to
     PAM is "pgbouncer". `pam` is not supported in the HBA configuration file.
 
+oauth
+:   Clients authenticate with an OAuth 2.0 bearer token using the
+    `OAUTHBEARER` SASL mechanism, and the token is verified by the validator
+    module configured with `oauth_validator_library`.  `auth_file` is not
+    used for the client token, but the connection to PostgreSQL still uses a
+    stored credential obtained from `auth_file` or `auth_query` (as with
+    `cert` authentication), so one of those must supply the server-side
+    password.  Available only when PgBouncer is built with `--with-oauth`.
+    `oauth` is not yet supported in the HBA configuration file.
+
 ### auth_hba_file
 
 HBA configuration file to use when `auth_type` is `hba`. See
@@ -555,6 +565,40 @@ LDAP connection options to use if `auth_type` is `ldap`.  (Not used if
 authentication is configured via `auth_hba_file`.)  Example:
 
     auth_ldap_options = ldapurl="ldap://127.0.0.1:12345/dc=example,dc=net?uid?sub"
+
+### oauth_validator_library
+
+Path to the validator module (a shared library) that verifies OAuth bearer
+tokens when `auth_type` is `oauth`.  The module is loaded once at startup and
+must export the validator interface described in `doc/oauth.md`.  Required for
+`oauth` authentication.  Changing it requires a restart.
+
+Default: not set
+
+### oauth_issuer
+
+The OAuth issuer (an `https://` URL) advertised to clients that connect
+without a token, so they can discover the identity provider's
+`.well-known/openid-configuration` endpoint and obtain one.  Only used with
+`auth_type = oauth`.
+
+Default: not set
+
+### oauth_scope
+
+The OAuth scope advertised alongside `oauth_issuer` in the discovery response.
+Only used with `auth_type = oauth`.
+
+Default: not set
+
+### oauth_delegate_ident_mapping
+
+When enabled, PgBouncer trusts the validator module to authorize the token for
+the requested role and skips its own identity check.  When disabled (the
+default), the identity the module reports must equal the PostgreSQL role the
+client is logging in as.
+
+Default: 0
 
 ## Log settings
 
