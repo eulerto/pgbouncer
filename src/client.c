@@ -142,6 +142,8 @@ static bool send_client_authreq(PgSocket *client)
 		SEND_generic(res, client, PqMsg_AuthenticationRequest, "i", AUTH_REQ_PASSWORD);
 	} else if (auth_type == AUTH_TYPE_SCRAM_SHA_256) {
 		SEND_generic(res, client, PqMsg_AuthenticationRequest, "iss", AUTH_REQ_SASL, "SCRAM-SHA-256", "");
+	} else if (auth_type == AUTH_TYPE_OAUTH) {
+		SEND_generic(res, client, PqMsg_AuthenticationRequest, "iss", AUTH_REQ_SASL, "OAUTHBEARER", "");
 	} else {
 		return false;
 	}
@@ -444,6 +446,7 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 	case AUTH_TYPE_LDAP:
 	case AUTH_TYPE_MD5:
 	case AUTH_TYPE_PAM:
+	case AUTH_TYPE_OAUTH:
 	case AUTH_TYPE_SCRAM_SHA_256:
 		ok = send_client_authreq(client);
 		break;
@@ -1213,6 +1216,86 @@ failed:
 	return false;
 }
 
+#ifdef HAVE_OAUTH
+
+/*
+ * Extract the bearer token from an OAUTHBEARER client initial response.
+ *
+ * The response is a GS2 header followed by 0x01-separated key=value fields,
+ * one of which is "auth=Bearer <token>" (RFC 7628).  Returns true and copies
+ * the token into tokbuf if a non-empty token is present; returns false for a
+ * missing/empty token (a discovery attempt) or one that does not fit.
+ */
+static bool oauth_extract_bearer_token(const uint8_t *data, uint32_t len, char *tokbuf, size_t tokbuf_sz)
+{
+	const char *p = (const char *)data;
+	const char *end = p + len;
+
+	/* Skip the GS2 header up to the first 0x01 separator. */
+	while (p < end && *p != 0x01)
+		p++;
+
+	while (p < end) {
+		const char *field;
+		size_t flen;
+
+		p++;	/* skip the 0x01 separator */
+		field = p;
+		while (p < end && *p != 0x01)
+			p++;
+		flen = p - field;
+
+		if (flen >= 5 && strncmp(field, "auth=", 5) == 0) {
+			const char *val = field + 5;
+			size_t vlen = flen - 5;
+
+			/* Strip the "Bearer " scheme prefix if present. */
+			if (vlen >= 7 && strncmp(val, "Bearer ", 7) == 0) {
+				val += 7;
+				vlen -= 7;
+			}
+			if (vlen == 0 || vlen >= tokbuf_sz)
+				return false;
+			memcpy(tokbuf, val, vlen);
+			tokbuf[vlen] = '\0';
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Send an OAUTHBEARER failure/discovery challenge so the client can locate
+ * the identity provider and obtain a token.  Returns false if no issuer is
+ * configured (nothing useful to advertise).
+ */
+static bool oauth_send_discovery_challenge(PgSocket *client)
+{
+	char json[1024];
+	int res;
+
+	if (!cf_oauth_issuer || !cf_oauth_issuer[0])
+		return false;
+
+	/*
+	 * RFC 7628 failure response.  The client uses openid-configuration to
+	 * discover the token endpoint and scope to request the right grant.
+	 */
+	snprintf(json, sizeof(json),
+		 "{\"status\":\"invalid_token\","
+		 "\"openid-configuration\":\"%s/.well-known/openid-configuration\","
+		 "\"scope\":\"%s\"}",
+		 cf_oauth_issuer,
+		 cf_oauth_scope ? cf_oauth_scope : "");
+
+	slog_debug(client, "OAUTHBEARER discovery challenge = \"%s\"", json);
+	SEND_generic(res, client, PqMsg_AuthenticationRequest, "ib",
+		     AUTH_REQ_SASL_CONT, json, strlen(json));
+	return res;
+}
+
+#endif /* HAVE_OAUTH */
+
 /* decide on packets of client in login phase */
 static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 {
@@ -1374,6 +1457,59 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 					return false;
 				}
 			}
+#ifdef HAVE_OAUTH
+		} else if (client->client_auth_type == AUTH_TYPE_OAUTH) {
+			const char *mech;
+			uint32_t length;
+			const uint8_t *data;
+			char token[OAUTH_MAX_TOKEN];
+
+			if (client->oauth_challenge_sent) {
+				/*
+				 * This is the client ACK to our discovery
+				 * challenge.  The OAUTHBEARER exchange fails here;
+				 * the client reconnects once it has a token.
+				 */
+				disconnect_client(client, true, "OAuth bearer token required");
+				return false;
+			}
+
+			/* process as SASLInitialResponse */
+			if (!mbuf_get_string(&pkt->data, &mech))
+				return false;
+			slog_debug(client, "C: selected SASL mechanism: %s", mech);
+			if (strcmp(mech, "OAUTHBEARER") != 0) {
+				disconnect_client(client, true, "client selected an invalid SASL authentication mechanism");
+				return false;
+			}
+			if (!mbuf_get_uint32be(&pkt->data, &length))
+				return false;
+			if (!mbuf_get_bytes(&pkt->data, length, &data))
+				return false;
+
+			if (oauth_extract_bearer_token(data, length, token, sizeof(token))) {
+				/* Validate asynchronously; resumed in oauth_poll(). */
+				if (!sbuf_pause(&client->sbuf)) {
+					explicit_bzero(token, sizeof(token));
+					disconnect_client(client, true, "pause failed");
+					return false;
+				}
+				oauth_auth_begin(client, token);
+				/* the queued request holds the only copy now */
+				explicit_bzero(token, sizeof(token));
+				return false;
+			}
+
+			/*
+			 * No usable token: offer a discovery challenge and wait
+			 * for the client ACK (handled above on the next packet).
+			 */
+			if (!oauth_send_discovery_challenge(client)) {
+				disconnect_client(client, true, "OAuth bearer token required");
+				return false;
+			}
+			client->oauth_challenge_sent = true;
+#endif /* HAVE_OAUTH */
 		} else {
 			/* process as PasswordMessage */
 			ok = mbuf_get_string(&pkt->data, &passwd);

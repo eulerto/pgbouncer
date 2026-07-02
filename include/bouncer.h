@@ -726,7 +726,8 @@ struct PgSocket {
 	bool protocol_negotiated : 1;	/* client: NegotiateProtocolVersion already sent */
 	bool wait_for_user_conn : 1;	/* client: waiting for auth_conn server connection */
 	bool wait_for_user : 1;		/* client: waiting for auth_conn query results */
-	bool wait_for_auth : 1;		/* client: waiting for external auth (PAM/LDAP) to be completed */
+	bool wait_for_auth : 1;		/* client: waiting for external auth (PAM/LDAP/OAuth) to be completed */
+	bool oauth_challenge_sent : 1;	/* client: OAUTHBEARER discovery challenge was sent, expecting the client ack */
 
 	bool suspended : 1;		/* client/server: if the socket is suspended */
 
