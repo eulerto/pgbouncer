@@ -29,5 +29,22 @@ AM_FEATURES = libusual
 include ../config.mak
 include ../lib/mk/antimake.mk
 
-check: all
+# Standalone smoke test for the example OAuth validator module.  Builds the
+# validator as a shared object, builds the dlopen-based test driver, and runs
+# the driver against the validator.
+oauth_validator.so: oauth_validator.c ../include/oauth.h
+	$(CC) -shared -fPIC -I../include -o $@ oauth_validator.c
+
+oauth_validator_test_driver: oauth_validator_test.c ../include/oauth.h
+	$(CC) -I../include -o $@ oauth_validator_test.c -ldl
+
+oauth_validator_test: oauth_validator_test_driver oauth_validator.so
+	./oauth_validator_test_driver ./oauth_validator.so
+.PHONY: oauth_validator_test
+
+clean-local:
+	rm -f oauth_validator.so oauth_validator_test_driver
+.PHONY: clean-local
+
+check: all oauth_validator_test
 	./hba_test

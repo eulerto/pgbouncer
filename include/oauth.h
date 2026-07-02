@@ -121,6 +121,11 @@ typedef struct OAuthValidatorCallbacks {
 typedef const OAuthValidatorCallbacks *(*OAuthValidatorModuleInit) (void);
 
 /*
+ * A self-contained validator module (for test purposes) needs it.
+ */
+typedef struct PgSocket PgSocket;
+
+/*
  * Defines how many authentication requests can be placed on the waiting
  * queue.  When the queue is full, calls to oauth_auth_begin() block until
  * a slot becomes free.
