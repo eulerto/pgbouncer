@@ -106,6 +106,16 @@ Tests hba parsing.  Run `make all` to build and `./hba_test` to execute.
 This test is run by `make check`.
 
 
+### `oauth_validator.c` / `oauth_validator_test.c`
+
+`oauth_validator.c` is an example/reference OAuth (OAUTHBEARER) validator
+module.  It resolves bearer tokens against a flat file named by the
+`PGBOUNCER_OAUTH_VALIDATOR_TOKENS` environment variable and is meant as a
+template and for testing (a real module would verify a JWT or call the
+provider's introspection endpoint).  `oauth_validator_test.c` is a standalone
+harness that `dlopen()`s the module and checks the ABI plus a good/bad token,
+without needing a running server.
+
 ### `run-conntest.sh`
 
 This is a more complex setup that continuously runs queries through PgBouncer
