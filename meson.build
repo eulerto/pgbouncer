@@ -583,6 +583,7 @@ pgbouncer_sources = files(
   'src/loader.c',
   'src/main.c',
   'src/messages.c',
+  'src/oauth.c',
   'src/objects.c',
   'src/pam.c',
   'src/pktbuf.c',
