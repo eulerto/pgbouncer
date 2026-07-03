@@ -366,8 +366,8 @@ cdata.set('USE_SYSTEMD', systemd.found() ? 1 : false,
 # PAM (mirrors --with-pam)
 # ----------------------------------------------------------------------
 
-# pam/ldap are combo options ('auto'/'enabled'/'disabled') rather than meson
-# `feature`s: the feature accessors (.allowed(), and passing a feature to
+# pam/ldap/oauth are combo options ('auto'/'enabled'/'disabled') rather than
+# meson `feature`s: the feature accessors (.allowed(), and passing a feature to
 # find_library's `required`) need meson 0.59, newer than our floor. The string
 # compare below reproduces the same semantics on older meson.
 pamopt = get_option('pam')
@@ -392,6 +392,40 @@ endif
 if ldap.found()
   cdata.set('HAVE_LDAP', 1, description: 'LDAP support.')
   cdata.set('HAVE_LDAP_H', 1)
+endif
+
+# ----------------------------------------------------------------------
+# OAuth (mirrors --with-oauth)
+# ----------------------------------------------------------------------
+
+# OAuth needs more than one library, though: dlopen() to load a validator
+# module at run time, plus libcurl and jansson, which the validator modules
+# shipped with PgBouncer are built against.
+oauthopt = get_option('oauth')
+oauth_required = oauthopt == 'enabled'
+libdl = not_found_dep
+oauth_support = false
+if oauthopt != 'disabled'
+  # dlopen() is in libc on newer glibc and in libdl elsewhere.
+  if cc.has_function('dlopen')
+    libdl = declare_dependency()
+  else
+    libdl = cc.find_library('dl', required: oauth_required)
+  endif
+
+  # probe, never link (dlopen modules)
+  libcurl = dependency('libcurl', required: oauth_required)
+  jansson = dependency('jansson', required: oauth_required)
+
+  oauth_support = (libdl.found() and libcurl.found() and jansson.found()
+                   and cc.has_header('dlfcn.h') and cc.has_header('pthread.h'))
+  if oauth_required and not oauth_support
+    error('dlopen and pthreads are needed for OAuth support')
+  endif
+endif
+if oauth_support
+  cdata.set('HAVE_OAUTH', 1, description: 'OAuth support.')
+  cdata.set('HAVE_DLFCN_H', 1)
 endif
 
 # ----------------------------------------------------------------------
@@ -592,6 +626,7 @@ pgbouncer_deps = [
   systemd,
   pam,
   ldap,
+  libdl,
   threads,
 ] + dns_deps + net_deps
 
@@ -729,6 +764,7 @@ endif
 summary({
   'adns': adns,
   'ldap': ldap.found(),
+  'oauth': oauth_support,
   'pam': pam.found(),
   'systemd': systemd.found(),
   'tls': openssl.found(),

@@ -226,6 +226,13 @@ def get_ldap_support():
 LDAP_SUPPORT = get_ldap_support()
 
 
+def get_oauth_support():
+    return get_build_feature("oauth_support", "HAVE_OAUTH")
+
+
+OAUTH_SUPPORT = get_oauth_support()
+
+
 def get_tls_support():
     return get_build_feature("tls_support", "USUAL_LIBSSL_FOR_TLS")
 
