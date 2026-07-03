@@ -101,6 +101,30 @@ AC_ARG_WITH(ldap,
     fi
   ], [])
 
+dnl Check for OAuth authentication support
+oauth_support=no
+AC_ARG_WITH(oauth,
+  AS_HELP_STRING([--with-oauth], [build with OAuth support]),
+  [ OAUTH=
+    if test "$withval" != no; then
+        have_pthreads=no
+        AC_CHECK_HEADERS(dlfcn.h, [have_dlfcn_header=t])
+        AC_CHECK_HEADERS(pthread.h, [have_pthreads=yes])
+        AC_SEARCH_LIBS(dlopen, dl, [have_libdl=t])
+        AC_SEARCH_LIBS(pthread_create, pthread, [], [have_pthreads=no])
+        if test x"${have_pthreads}" != xyes; then
+           AC_MSG_ERROR([pthread library should be available for OAuth support])
+        fi
+        if test x"${have_dlfcn_header}" != x -a x"${have_libdl}" != x -a x"${have_pthreads}" = xyes; then
+          oauth_support=yes
+          AC_SUBST(oauth_support)
+          AC_DEFINE(HAVE_OAUTH, 1, [OAuth support])
+        else
+          AC_MSG_ERROR([dlopen is needed for OAuth compilation])
+        fi
+    fi
+  ], [])
+
 dnl Check for systemd support
 AC_MSG_CHECKING([whether to build with systemd support])
 AC_ARG_WITH(systemd,
@@ -214,6 +238,7 @@ else
   echo "  adns    = compat"
 fi
 echo "  ldap    = $ldap_support"
+echo "  oauth   = $oauth_support"
 echo "  pam     = $pam_support"
 echo "  systemd = $with_systemd"
 echo "  tls     = $tls_support"
