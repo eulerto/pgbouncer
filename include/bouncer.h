@@ -190,6 +190,7 @@ extern int cf_sbuf_len;
 #include "hba.h"
 #include "ldapauth.h"
 #include "messages.h"
+#include "oauth.h"
 #include "pam.h"
 #include "prepare.h"
 
