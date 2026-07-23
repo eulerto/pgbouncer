@@ -100,13 +100,19 @@ static void shutdown(ValidatorModuleState *state)
 static bool validate(ValidatorModuleState *state,
 		     const char *token, const char *role,
 		     const char *issuer, const char *scope,
-		     ValidatorModuleResult *result)
+		     int timeout, ValidatorModuleResult *result)
 {
 	struct token_entry *e;
 
 	(void) role;
 	(void) issuer;
 	(void) scope;
+	/*
+	 * This example resolves tokens from a local file, so there is no
+	 * network wait to bound; a real validator would apply timeout to
+	 * its IdP request (e.g. curl_easy_setopt(..., CURLOPT_TIMEOUT_MS, ...)).
+	 */
+	(void) timeout;
 
 	result->authorized = false;
 	result->authn_id = NULL;

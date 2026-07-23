@@ -78,19 +78,26 @@ typedef struct ValidatorModuleResult {
  * background worker thread and must be thread-safe and self-contained; it
  * returns false on an internal error (as opposed to a merely unauthorized
  * token, which is reported through result->authorized).
+ *
+ * timeout (in milliseconds) that the module must apply to its own blocking
+ * work (e.g. libcurl CURLOPT_TIMEOUT_MS); 0 means no limit.  PgBouncer runs
+ * validate_cb on a detached worker thread it cannot preempt, so honoring the
+ * timeout is the module responsibility: a validation that ignores it
+ * head-of-line-blocks every other pending OAuth login.
  */
 typedef void (*ValidatorStartupCB) (ValidatorModuleState *state);
 typedef void (*ValidatorShutdownCB) (ValidatorModuleState *state);
 typedef bool (*ValidatorValidateCB) (ValidatorModuleState *state,
 				     const char *token, const char *role,
 				     const char *issuer, const char *scope,
+				     int timeout,
 				     ValidatorModuleResult *result);
 
 /*
  * Identifies the compiled ABI version of the validator module. Bump when the
  * callback struct layout or semantic changes.
  */
-#define OAUTH_VALIDATOR_MAGIC 0x20260701
+#define OAUTH_VALIDATOR_MAGIC 0x20260702
 
 typedef struct OAuthValidatorCallbacks {
 	uint32_t magic;		/* must be set to OAUTH_VALIDATOR_MAGIC */
