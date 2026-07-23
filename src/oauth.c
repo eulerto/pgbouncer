@@ -46,12 +46,6 @@
  */
 #define OAUTH_QUEUE_WAIT_SLEEP_MCS      (100*1000)
 
-/*
- * Maximum sizes for issuer/scope copied into a request from configuration.
- */
-#define OAUTH_MAX_ISSUER        512
-#define OAUTH_MAX_SCOPE         512
-
 struct oauth_auth_request {
 	/* The socket we check authentication for */
 	PgSocket *client;
@@ -230,6 +224,102 @@ static void set_request_status(struct oauth_auth_request *request, int status)
 }
 
 /*
+ * Split the next key=value pair out of *pos (HBA style).  A value may be
+ * double-quoted so it can contain spaces, '=' or ':' (issuer URLs), with ""
+ * as an embedded quote.  The buffer is modified in place (unescaped and
+ * NUL-terminated) and *pos is advanced past the pair.  Returns false when no
+ * more pairs remain; sets *ok to false on a malformed pair.
+ */
+static bool oauth_next_option(char **pos, char **key, char **val, bool *ok)
+{
+	char *p = *pos;
+	char *k, *v, *w;
+
+	while (*p && isspace((unsigned char)*p))
+		p++;
+	if (*p == '\0')
+		return false;
+
+	k = p;
+	while (*p && *p != '=' && !isspace((unsigned char)*p))
+		p++;
+	if (*p != '=') {
+		*ok = false;
+		return false;
+	}
+	*p++ = '\0';
+
+	if (*p == '"') {
+		p++;
+		v = w = p;
+		while (*p) {
+			if (*p == '"' && p[1] == '"') {
+				*w++ = '"';
+				p += 2;
+			} else if (*p == '"') {
+				p++;
+				break;
+			} else {
+				*w++ = *p++;
+			}
+		}
+		*w = '\0';
+	} else {
+		v = p;
+		while (*p && !isspace((unsigned char)*p))
+			p++;
+		if (*p)
+			*p++ = '\0';
+	}
+
+	*pos = p;
+	*key = k;
+	*val = v;
+	return true;
+}
+
+/*
+ * Resolve the effective OAuth options for a client's login: start from the
+ * global oauth_* settings, then apply any per-HBA-line overrides parsed out of
+ * hba_options (NULL for a global auth_type=oauth).  Main thread only.
+ */
+bool oauth_prepare_options(PgSocket *client, const char *hba_options)
+{
+	char buf[MAX_OAUTH_CONFIG];
+	char *pos, *key, *val;
+	bool ok = true;
+
+	/* Defaults come from the global configuration. */
+	safe_strcpy(client->oauth_issuer, cf_oauth_issuer ? cf_oauth_issuer : "", sizeof(client->oauth_issuer));
+	safe_strcpy(client->oauth_scope, cf_oauth_scope ? cf_oauth_scope : "", sizeof(client->oauth_scope));
+	client->oauth_delegate_ident_mapping = cf_oauth_delegate_ident_mapping;
+
+	if (!hba_options || !hba_options[0])
+		return true;
+
+	safe_strcpy(buf, hba_options, sizeof(buf));
+	pos = buf;
+	while (oauth_next_option(&pos, &key, &val, &ok)) {
+		if (strcmp(key, "issuer") == 0) {
+			safe_strcpy(client->oauth_issuer, val, sizeof(client->oauth_issuer));
+		} else if (strcmp(key, "scope") == 0) {
+			safe_strcpy(client->oauth_scope, val, sizeof(client->oauth_scope));
+		} else if (strcmp(key, "delegate_ident_mapping") == 0) {
+			client->oauth_delegate_ident_mapping =
+				(strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
+		} else {
+			log_warning("invalid oauth HBA option: \"%s\"", key);
+			return false;
+		}
+	}
+	if (!ok) {
+		log_warning("malformed oauth HBA options: \"%s\"", hba_options);
+		return false;
+	}
+	return true;
+}
+
+/*
  * Enqueue a bearer token for validation.  The result becomes available on a
  * later oauth_poll() call.  Blocks if the queue is full.  Main thread only.
  */
@@ -266,8 +356,8 @@ void oauth_auth_begin(PgSocket *client, const char *token)
 	memcpy(&request->remote_addr, &client->remote_addr, sizeof(client->remote_addr));
 	safe_strcpy(request->username, client->login_user_credentials->name, MAX_USERNAME);
 	safe_strcpy(request->token, token, sizeof(request->token));
-	safe_strcpy(request->issuer, cf_oauth_issuer ? cf_oauth_issuer : "", sizeof(request->issuer));
-	safe_strcpy(request->scope, cf_oauth_scope ? cf_oauth_scope : "", sizeof(request->scope));
+	safe_strcpy(request->issuer, client->oauth_issuer, sizeof(request->issuer));
+	safe_strcpy(request->scope, client->oauth_scope, sizeof(request->scope));
 	request->authorized = false;
 	request->authn_id = NULL;
 
@@ -381,7 +471,7 @@ static void oauth_auth_finish(struct oauth_auth_request *request, int status)
 		return;
 	}
 
-	if (cf_oauth_delegate_ident_mapping) {
+	if (client->oauth_delegate_ident_mapping) {
 		/*
 		 * The validator module is authoritative: it authorized this
 		 * token for the requested role, so skip the identity check.
@@ -442,6 +532,11 @@ static bool check_oauth_auth(struct oauth_auth_request *request)
 void oauth_init(void)
 {
 	/* do nothing */
+}
+
+bool oauth_prepare_options(PgSocket *client, const char *hba_options)
+{
+	return false;
 }
 
 void oauth_auth_begin(PgSocket *client, const char *token)

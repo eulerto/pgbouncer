@@ -502,7 +502,9 @@ oauth
     stored credential obtained from `auth_file` or `auth_query` (as with
     `cert` authentication), so one of those must supply the server-side
     password.  Available only when PgBouncer is built with `--with-oauth`.
-    `oauth` is not yet supported in the HBA configuration file.
+    Supported in the HBA configuration file, where the `oauth_issuer`,
+    `oauth_scope` and `oauth_delegate_ident_mapping` globals can be overridden
+    per line (see [HBA file format](#hba-file-format)).
 
 ### auth_hba_file
 
@@ -1750,6 +1752,13 @@ The file follows the format of the PostgreSQL `pg_hba.conf` file
 * Auth-method field: Only methods supported by PgBouncer's `auth_type`
   are supported, plus `peer` and `reject`, but except `any` and `pam`, which only work globally.
 * User name map (`map=`) parameter is supported when `auth_type` is `cert` or `peer`.
+* The `oauth` method accepts per-line options after the method name, as
+  `key=value` pairs (quote values that contain spaces, e.g. a scope, or a
+  URL).  Recognized keys are `issuer`, `scope` and `delegate_ident_mapping`;
+  each overrides the corresponding `oauth_*` global for connections matching
+  that rule.  Example:
+
+      host all all 0.0.0.0/0 oauth issuer="https://issuer.example.com" scope="openid email"
 
 ## Ident map file format
 

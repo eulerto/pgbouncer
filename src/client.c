@@ -424,6 +424,13 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 	}
 #endif
 
+#ifndef HAVE_OAUTH
+	if (auth == AUTH_TYPE_OAUTH) {
+		disconnect_client(client, true, "oauth is not supported by this build");
+		return false;
+	}
+#endif
+
 	if (auth == AUTH_TYPE_MD5) {
 		if (get_password_type(client->login_user_credentials->passwd) == PASSWORD_TYPE_SCRAM_SHA_256)
 			auth = AUTH_TYPE_SCRAM_SHA_256;
@@ -431,6 +438,20 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 
 	/* remember method */
 	client->client_auth_type = auth;
+
+#ifdef HAVE_OAUTH
+	/*
+	 * Resolve the effective OAuth options while the matched HBA rule is still
+	 * in hand (globals plus any per-line overrides). The rule is NULL when
+	 * auth_type=oauth is set globally.
+	 */
+	if (auth == AUTH_TYPE_OAUTH) {
+		if (!oauth_prepare_options(client, rule ? rule->auth_options : NULL)) {
+			disconnect_client(client, true, "invalid oauth options in HBA configuration");
+			return false;
+		}
+	}
+#endif
 
 	switch (auth) {
 	case AUTH_TYPE_ANY:
@@ -1271,22 +1292,33 @@ static bool oauth_extract_bearer_token(const uint8_t *data, uint32_t len, char *
  */
 static bool oauth_send_discovery_challenge(PgSocket *client)
 {
-	char json[1024];
+	/*
+	 * Large enough for the whole challenge: the two substituted values are
+	 * bounded by their field sizes and the surrounding literal is 96 bytes,
+	 * so it never has to be truncated into invalid JSON.
+	 */
+	char json[OAUTH_MAX_ISSUER + OAUTH_MAX_SCOPE + 128];
 	int res;
+	int len;
 
-	if (!cf_oauth_issuer || !cf_oauth_issuer[0])
+	if (!client->oauth_issuer[0])
 		return false;
 
 	/*
 	 * RFC 7628 failure response.  The client uses openid-configuration to
 	 * discover the token endpoint and scope to request the right grant.
 	 */
-	snprintf(json, sizeof(json),
-		 "{\"status\":\"invalid_token\","
-		 "\"openid-configuration\":\"%s/.well-known/openid-configuration\","
-		 "\"scope\":\"%s\"}",
-		 cf_oauth_issuer,
-		 cf_oauth_scope ? cf_oauth_scope : "");
+	len = snprintf(json, sizeof(json),
+		       "{\"status\":\"invalid_token\","
+		       "\"openid-configuration\":\"%s/.well-known/openid-configuration\","
+		       "\"scope\":\"%s\"}",
+		       client->oauth_issuer,
+		       client->oauth_scope);
+
+	if (len < 0 || (size_t)len >= sizeof(json)) {
+		slog_error(client, "OAUTHBEARER discovery challenge does not fit in %zu bytes", sizeof(json));
+		return false;
+	}
 
 	slog_debug(client, "OAUTHBEARER discovery challenge = \"%s\"", json);
 	SEND_generic(res, client, PqMsg_AuthenticationRequest, "ib",

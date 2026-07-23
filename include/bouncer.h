@@ -792,6 +792,15 @@ struct PgSocket {
 #ifdef HAVE_LDAP
 	char ldap_options[MAX_LDAP_CONFIG];
 #endif
+#ifdef HAVE_OAUTH
+	/*
+	 * client: effective OAuth options, i.e. the global oauth_* settings with
+	 * any per-HBA-line overrides already applied.
+	 */
+	char oauth_issuer[OAUTH_MAX_ISSUER];
+	char oauth_scope[OAUTH_MAX_SCOPE];
+	int oauth_delegate_ident_mapping;
+#endif
 
 	VarCache vars;		/* state of interesting server parameters */
 

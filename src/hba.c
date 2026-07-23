@@ -774,12 +774,20 @@ static bool parse_line(struct HBA *hba, struct Ident *ident, struct TokParser *t
 		rule->rule_method = AUTH_TYPE_SCRAM_SHA_256;
 	} else if (check_kw(tp, "ldap")) {
 		rule->rule_method = AUTH_TYPE_LDAP;
+	} else if (check_kw(tp, "oauth")) {
+		rule->rule_method = AUTH_TYPE_OAUTH;
 	} else {
 		log_warning("hba line %d: unsupported method: buf=%s", linenr, tp->buf);
 		goto failed;
 	}
 
-	if (rule->rule_method == AUTH_TYPE_LDAP) {
+	/*
+	 * LDAP and OAuth carry free-form "key=value" options after the method
+	 * name.  Capture the rest of the line verbatim; the auth backend parses
+	 * it (src/ldapauth.c, src/oauth.c) so quoted values with spaces or URLs
+	 * survive the HBA tokenizer intact.
+	 */
+	if (rule->rule_method == AUTH_TYPE_LDAP || rule->rule_method == AUTH_TYPE_OAUTH) {
 		if ((rule->auth_options = strdup(tp->pos)) == NULL) {
 			log_warning("hba line %d: cannot get auth_options: buf=%s", linenr, tp->pos);
 			goto failed;
