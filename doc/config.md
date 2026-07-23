@@ -605,15 +605,27 @@ Default: 0
 ### oauth_validator_timeout
 
 Timeout (in seconds) handed to the validator module for verifying a single
-token, when `auth_type` is `oauth`.  Token validation runs on a background
-worker thread that PgBouncer cannot preempt, and a single worker serves all
-OAuth logins, so a validator that blocks on an unresponsive identity provider
-would stall every pending login.  The timeout is therefore *cooperative*:
+token, when `auth_type` is `oauth`.  Token validation runs on background
+worker threads that PgBouncer cannot preempt, and there are only
+`oauth_validator_workers` of them, so a validator that blocks on an
+unresponsive identity provider stalls the logins queued behind it and
+eventually every pending one.  The timeout is therefore *cooperative*:
 PgBouncer passes it to the module, and the module must apply it to its own
 network wait (for example libcurl `CURLOPT_TIMEOUT_MS`).  A value of 0 disables
 the timeout.
 
 Default: 10
+
+### oauth_validator_workers
+
+Number of threads that validate OAuth tokens.  The default of 1 where
+validations are serialized: a single slow identity provider call delays the
+ones behind it.  Raising it lets that many validations run concurrently, at the
+cost of more simultaneous load on the identity provider.  The value is clamped
+to at most the internal request-queue size and takes effect at startup only
+(changing it requires a restart).
+
+Default: 1
 
 ## Log settings
 

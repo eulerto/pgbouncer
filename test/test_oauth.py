@@ -250,6 +250,26 @@ async def test_oauth_validator_timeout_setting(oauth_bouncer):
     assert result["ready"] is True
 
 
+async def test_oauth_validator_worker_pool(oauth_bouncer):
+    # With a pool of workers, a mix of accepted/rejected tokens across the ring
+    # must each reach the right client (exercises the shared claim index and
+    # the out-of-order reap/reclaim in oauth_poll()).
+    oauth_bouncer.write_ini("oauth_validator_workers = 4")
+    await oauth_bouncer.restart()
+    assert "started 4 OAuth validation workers" in oauth_bouncer.log_path.read_text()
+
+    for token, expect_ok in [
+        ("validtoken", True),
+        ("wrongtoken", False),
+        ("validtoken", True),
+        ("mismatchtoken", False),
+    ]:
+        result = oauth_exchange(
+            oauth_bouncer, "oauthuser", "p0a", oauth_initial_response(token)
+        )
+        assert result["ok"] is expect_ok, (token, result)
+
+
 # -------------------------------------------------------------------
 # oauth as an HBA method with per-line options and pg_ident usermaps.
 # -------------------------------------------------------------------

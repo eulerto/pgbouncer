@@ -910,6 +910,7 @@ extern char *cf_oauth_issuer;
 extern char *cf_oauth_scope;
 extern int cf_oauth_delegate_ident_mapping;
 extern usec_t cf_oauth_validator_timeout;
+extern int cf_oauth_validator_workers;
 
 extern char *cf_pidfile;
 

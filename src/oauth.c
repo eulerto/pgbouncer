@@ -65,6 +65,10 @@ struct oauth_auth_request {
 	/* Protects status from concurrent main/worker access */
 	pthread_mutex_t mutex;
 
+	/* Main-thread-only: result already delivered to the client, waiting for
+	 * the head of the ring to catch up so the slot can be reclaimed. */
+	bool reaped;
+
 	/* The username (same as in client->login_user_credentials->name). */
 	char username[MAX_USERNAME];
 
@@ -90,15 +94,23 @@ struct oauth_auth_request {
  * All incoming requests are kept in a ring-buffer queue, which avoids memory
  * reallocation and thus minimizes cross-thread synchronization.
  *
- * oauth_first_taken_slot points to the first element in the queue;
- * oauth_first_free_slot points to the next slot after the last element.
- * They are equal when the queue is empty.
+ * oauth_first_taken_slot points to the oldest element still occupying the ring;
+ * oauth_first_free_slot points to the next slot after the last element;
+ * oauth_claim_slot points to the next element a worker will pick up.  The
+ * invariant is taken <= claim <= free (modulo the ring).  With a pool of
+ * workers, requests between claim and taken may still be validating and can
+ * complete out of order, so a slot carries a `reaped` flag and oauth_poll()
+ * delivers each result as soon as its worker finishes, reclaiming ring space
+ * contiguously from the head.
  */
 volatile int oauth_first_taken_slot;
 volatile int oauth_first_free_slot;
+volatile int oauth_claim_slot;
 struct oauth_auth_request oauth_auth_queue[OAUTH_REQUEST_QUEUE_SIZE];
 
-pthread_t oauth_worker_thread;
+/* Pool of validation worker threads; oauth_num_workers of them are started. */
+pthread_t oauth_worker_threads[OAUTH_REQUEST_QUEUE_SIZE];
+static int oauth_num_workers;
 
 /*
  * Mutex serializes access to the queue's tail; the condition variable wakes
@@ -139,6 +151,15 @@ void oauth_init(void)
 
 	oauth_first_taken_slot = 0;
 	oauth_first_free_slot = 0;
+	oauth_claim_slot = 0;
+
+	/* One worker preserves the original serialized behaviour; more let slow
+	 * validations proceed concurrently.  Never exceed the ring size. */
+	oauth_num_workers = cf_oauth_validator_workers;
+	if (oauth_num_workers < 1)
+		oauth_num_workers = 1;
+	if (oauth_num_workers > OAUTH_REQUEST_QUEUE_SIZE)
+		oauth_num_workers = OAUTH_REQUEST_QUEUE_SIZE;
 
 	rc = pthread_mutex_init(&oauth_queue_tail_mutex, NULL);
 	if (rc != 0)
@@ -154,9 +175,13 @@ void oauth_init(void)
 			die("failed to initialize a mutex for request[%d]: %s", i, strerror(errno));
 	}
 
-	rc = pthread_create(&oauth_worker_thread, NULL, &oauth_auth_worker, NULL);
-	if (rc != 0)
-		die("failed to create the authentication thread: %s", strerror(errno));
+	for (int i = 0; i < oauth_num_workers; i++) {
+		rc = pthread_create(&oauth_worker_threads[i], NULL, &oauth_auth_worker, NULL);
+		if (rc != 0)
+			die("failed to create an authentication thread: %s", strerror(errno));
+	}
+
+	log_info("number of OAuth validation workers: %d", oauth_num_workers);
 }
 
 /*
@@ -379,6 +404,7 @@ void oauth_auth_begin(PgSocket *client, const char *token)
 	request->timeout = (int)(cf_oauth_validator_timeout / 1000);
 	request->authorized = false;
 	request->authn_id = NULL;
+	request->reaped = false;
 
 	oauth_first_free_slot = next_free_slot;
 
@@ -395,16 +421,23 @@ int oauth_poll(void)
 	struct oauth_auth_request *request;
 	int count = 0;
 	int status;
+	int i;
 
-	while (oauth_first_taken_slot != oauth_first_free_slot) {
-		request = &oauth_auth_queue[oauth_first_taken_slot];
+	/*
+	 * Deliver every completed result, in whatever order the workers finished
+	 * them.  Requests still validating (or not yet claimed) are simply
+	 * skipped; with multiple workers a later request may finish before an
+	 * earlier one, and its client should not wait for the head.
+	 */
+	for (i = oauth_first_taken_slot; i != oauth_first_free_slot; i = (i + 1) % OAUTH_REQUEST_QUEUE_SIZE) {
+		request = &oauth_auth_queue[i];
+
+		if (request->reaped)
+			continue;
 
 		status = get_request_status(request);
-		if (status == OAUTH_STATUS_IN_PROGRESS) {
-			/* The oldest request is still running, so all newer ones
-			 * are too; stop scanning. */
-			break;
-		}
+		if (status == OAUTH_STATUS_IN_PROGRESS)
+			continue;
 
 		if (is_valid_socket(request))
 			oauth_auth_finish(request, status);
@@ -412,8 +445,17 @@ int oauth_poll(void)
 		/* Release the identity string handed over by the worker. */
 		free(request->authn_id);
 		request->authn_id = NULL;
-
+		request->reaped = true;
 		count++;
+	}
+
+	/*
+	 * Reclaim ring space contiguously from the head: a slot can be reused
+	 * only once every older slot has been reaped, so the indices stay
+	 * monotonic and the worker claim logic remains simple.
+	 */
+	while (oauth_first_taken_slot != oauth_first_free_slot &&
+	       oauth_auth_queue[oauth_first_taken_slot].reaped) {
 		oauth_first_taken_slot = (oauth_first_taken_slot + 1) % OAUTH_REQUEST_QUEUE_SIZE;
 	}
 
@@ -426,23 +468,29 @@ int oauth_poll(void)
  */
 static void *oauth_auth_worker(void *arg)
 {
-	int current_slot = oauth_first_taken_slot;
 	struct oauth_auth_request *request;
+	int cur_slot;
 	int status;
 
 	while (true) {
-		/* Wait for new data in the queue */
+		/*
+		 * Claim the next unclaimed request; block until one appears.  The
+		 * shared claim index hands each worker in the pool a distinct
+		 * slot, so validations run concurrently.
+		 */
 		pthread_mutex_lock(&oauth_queue_tail_mutex);
 
-		while (current_slot == oauth_first_free_slot)
+		while (oauth_claim_slot == oauth_first_free_slot)
 			pthread_cond_wait(&oauth_data_available, &oauth_queue_tail_mutex);
+
+		cur_slot = oauth_claim_slot;
+		oauth_claim_slot = (oauth_claim_slot + 1) % OAUTH_REQUEST_QUEUE_SIZE;
 
 		pthread_mutex_unlock(&oauth_queue_tail_mutex);
 
-		log_debug("oauth_auth_worker(): processing slot %d", current_slot);
+		log_debug("oauth_auth_worker(): processing slot %d", cur_slot);
 
-		request = &oauth_auth_queue[current_slot];
-		current_slot = (current_slot + 1) % OAUTH_REQUEST_QUEUE_SIZE;
+		request = &oauth_auth_queue[cur_slot];
 
 		if (check_oauth_auth(request))
 			status = OAUTH_STATUS_SUCCESS;

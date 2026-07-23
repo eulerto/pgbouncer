@@ -131,6 +131,7 @@ char *cf_oauth_issuer;
 char *cf_oauth_scope;
 int cf_oauth_delegate_ident_mapping;
 usec_t cf_oauth_validator_timeout;
+int cf_oauth_validator_workers;
 char *cf_track_extra_parameters;
 
 int cf_max_client_conn;
@@ -324,6 +325,7 @@ static const struct CfKey bouncer_params [] = {
 	CF_ABS("oauth_scope", CF_STR, cf_oauth_scope, 0, NULL),
 	CF_ABS("oauth_validator_library", CF_STR, cf_oauth_validator_library, CF_NO_RELOAD, NULL),
 	CF_ABS("oauth_validator_timeout", CF_TIME_USEC, cf_oauth_validator_timeout, 0, "10"),
+	CF_ABS("oauth_validator_workers", CF_INT, cf_oauth_validator_workers, CF_NO_RELOAD, "1"),
 	CF_ABS("peer_id", CF_INT, cf_peer_id, 0, "0"),
 	CF_ABS("pidfile", CF_STR, cf_pidfile, CF_NO_RELOAD, ""),
 	CF_ABS("pkt_buf", CF_INT, cf_sbuf_len, CF_NO_RELOAD, "4096"),
