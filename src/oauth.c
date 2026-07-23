@@ -293,6 +293,7 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 	safe_strcpy(client->oauth_issuer, cf_oauth_issuer ? cf_oauth_issuer : "", sizeof(client->oauth_issuer));
 	safe_strcpy(client->oauth_scope, cf_oauth_scope ? cf_oauth_scope : "", sizeof(client->oauth_scope));
 	client->oauth_delegate_ident_mapping = cf_oauth_delegate_ident_mapping;
+	client->oauth_map[0] = '\0';
 
 	if (!hba_options || !hba_options[0])
 		return true;
@@ -307,6 +308,8 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 		} else if (strcmp(key, "delegate_ident_mapping") == 0) {
 			client->oauth_delegate_ident_mapping =
 				(strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
+		} else if (strcmp(key, "map") == 0) {
+			safe_strcpy(client->oauth_map, val, sizeof(client->oauth_map));
 		} else {
 			log_warning("invalid oauth HBA option: \"%s\"", key);
 			return false;
@@ -314,6 +317,16 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 	}
 	if (!ok) {
 		log_warning("malformed oauth HBA options: \"%s\"", hba_options);
+		return false;
+	}
+
+	/*
+	 * A usermap and delegation are mutually exclusive: delegation trusts the
+	 * IdP for role selection, a map resolves it locally.  Refuse the
+	 * ambiguous combination rather than silently ignoring one.
+	 */
+	if (client->oauth_map[0] && client->oauth_delegate_ident_mapping) {
+		log_warning("oauth HBA options: \"map\" and \"delegate_ident_mapping\" are mutually exclusive");
 		return false;
 	}
 	return true;
@@ -478,6 +491,27 @@ static void oauth_auth_finish(struct oauth_auth_request *request, int status)
 		 */
 		slog_debug(client, "oauth: delegated authorization for user \"%s\" (authn_id=\"%s\")",
 			   request->username, request->authn_id ? request->authn_id : "");
+		sbuf_continue(&client->sbuf);
+		return;
+	}
+
+	if (client->oauth_map[0]) {
+		/*
+		 * pg_ident usermap: the proven identity (authn_id) is the
+		 * system-username and the requested role the database-username.
+		 * Re-resolve against the live parsed_ident so a config reload
+		 * during the async validation window cannot leave us using a
+		 * freed map.
+		 */
+		if (!request->authn_id ||
+		    !ident_map_check(parsed_ident, client->oauth_map, request->authn_id, request->username)) {
+			slog_warning(client, "oauth: ident map \"%s\" has no match for identity \"%s\" -> user \"%s\"",
+				     client->oauth_map, request->authn_id ? request->authn_id : "(none)", request->username);
+			disconnect_client(client, true, "OAuth identity does not match requested user");
+			return;
+		}
+		slog_debug(client, "oauth: ident map \"%s\" matched identity \"%s\" -> user \"%s\"",
+			   client->oauth_map, request->authn_id, request->username);
 		sbuf_continue(&client->sbuf);
 		return;
 	}

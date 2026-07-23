@@ -79,3 +79,11 @@ void ident_free(struct Ident *ident);
 struct HBA *hba_load_rules(const char *fn, struct Ident *ident);
 void hba_free(struct HBA *hba);
 struct HBARule *hba_eval(struct HBA *hba, PgAddr *addr, bool is_tls, ReplicationType replication, const char *dbname, const char *username);
+
+/*
+ * Return true if the ident map named mapname exists in ident and contains a
+ * mapping whose system-username equals sys_user and whose database-username
+ * is either "all" or equals pg_user.  Used by auth methods (e.g. oauth) that
+ * resolve a usermap outside the synchronous cert/peer login paths.
+ */
+bool ident_map_check(struct Ident *ident, const char *mapname, const char *sys_user, const char *pg_user);
