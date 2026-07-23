@@ -110,6 +110,9 @@ typedef struct OAuthValidatorCallbacks {
 #define OAUTH_MAX_ISSUER 512
 #define OAUTH_MAX_SCOPE 512
 
+/* Maximum length of a per-HBA-line oauth option string. */
+#define MAX_OAUTH_CONFIG 1024
+
 /* Symbol every validator module must export. */
 #define OAUTH_VALIDATOR_INIT_SYMBOL "_pgbouncer_oauth_validator_module_init"
 
@@ -134,6 +137,14 @@ typedef struct PgSocket PgSocket;
 
 /* Load the validator module and start the validation worker thread. */
 void oauth_init(void);
+
+/*
+ * Resolve the effective OAuth options for a client's login into the client
+ * struct, starting from the global oauth_* settings and applying any
+ * per-HBA-line overrides in hba_options (NULL when auth_type=oauth is set
+ * globally).  Returns false on a malformed option string.  Main thread only.
+ */
+bool oauth_prepare_options(PgSocket *client, const char *hba_options);
 
 /*
  * Begin validating a bearer token for a client.  The result becomes
