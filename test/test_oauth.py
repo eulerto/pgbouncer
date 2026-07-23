@@ -235,3 +235,151 @@ async def test_oauth_discovery_challenge(oauth_bouncer):
     assert "openid email" in challenge
     assert result["error"] is not None
     assert "OAuth bearer token required" in result["error"]
+
+
+# -------------------------------------------------------------------
+# oauth as an HBA method with per-line options and pg_ident usermaps.
+# -------------------------------------------------------------------
+
+
+def _hba_path(bouncer):
+    return bouncer.config_dir / "oauth_hba.conf"
+
+
+def _ident_path(bouncer):
+    return bouncer.config_dir / "oauth_ident.conf"
+
+
+async def set_hba(bouncer, hba_line, ident=""):
+    """Rewrite the oauth HBA (and ident) files and reload PgBouncer."""
+    _hba_path(bouncer).write_text(hba_line + "\n")
+    _ident_path(bouncer).write_text(ident)
+    bouncer.admin("reload")
+
+
+@pytest.fixture
+async def oauth_hba_bouncer(bouncer, pg, tmp_path, monkeypatch):
+    """PgBouncer with auth_type=hba selecting oauth through auth_hba_file.
+
+    Shares the validator/token/role setup with oauth_bouncer, but the method
+    and its per-line options come from the HBA file so the tests can exercise
+    per-line issuer/scope/delegate_ident_mapping and map=.  The global
+    oauth_issuer/oauth_scope are set to distinctive values so a test can prove
+    a per-line option actually overrides them.
+    """
+    validator = build_validator(tmp_path)
+
+    tokens = tmp_path / "tokens.txt"
+    tokens.write_text("validtoken oauthuser\nmismatchtoken otheruser\n")
+    monkeypatch.setenv("PGBOUNCER_OAUTH_VALIDATOR_TOKENS", str(tokens))
+
+    pg.sql("drop role if exists oauthuser")
+    pg.sql("create user oauthuser")
+    with bouncer.auth_path.open("a") as f:
+        f.write('"oauthuser" "unused"\n')
+
+    # A benign starting rule so the files exist before the first (re)start.
+    _hba_path(bouncer).write_text("host all all all oauth\n")
+    _ident_path(bouncer).write_text("")
+
+    bouncer.write_ini("auth_type = hba")
+    bouncer.write_ini(f"oauth_validator_library = {validator}")
+    bouncer.write_ini("oauth_issuer = https://global-issuer.example.com")
+    bouncer.write_ini("oauth_scope = global-scope")
+    bouncer.write_ini(f"auth_hba_file = {_hba_path(bouncer)}")
+    bouncer.write_ini(f"auth_ident_file = {_ident_path(bouncer)}")
+    await bouncer.restart()
+
+    yield bouncer
+
+
+async def test_oauth_hba_valid_token(oauth_hba_bouncer):
+    await set_hba(oauth_hba_bouncer, "host all all all oauth")
+    result = oauth_exchange(
+        oauth_hba_bouncer, "oauthuser", "p0a", oauth_initial_response("validtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+    assert result["ready"] is True
+
+
+async def test_oauth_hba_per_line_issuer_scope(oauth_hba_bouncer):
+    # The per-line issuer/scope must override the (distinct) globals in the
+    # discovery challenge.
+    await set_hba(
+        oauth_hba_bouncer,
+        'host all all all oauth issuer="https://line-issuer.example.com" scope="line scope"',
+    )
+    result = oauth_exchange(
+        oauth_hba_bouncer, "oauthuser", "p0a", oauth_initial_response_no_token()
+    )
+    assert result["challenge"] is not None
+    challenge = result["challenge"].decode()
+    assert (
+        "https://line-issuer.example.com/.well-known/openid-configuration" in challenge
+    )
+    assert "line scope" in challenge
+    # The globals must not leak through.
+    assert "global-issuer" not in challenge
+    assert "global-scope" not in challenge
+
+
+async def test_oauth_hba_per_line_delegate(oauth_hba_bouncer):
+    # delegate_ident_mapping=1 on the line trusts the module, so a mismatching
+    # identity still logs in.
+    await set_hba(oauth_hba_bouncer, "host all all all oauth delegate_ident_mapping=1")
+    result = oauth_exchange(
+        oauth_hba_bouncer, "oauthuser", "p0a", oauth_initial_response("mismatchtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+    assert result["ready"] is True
+
+
+async def test_oauth_hba_usermap_match(oauth_hba_bouncer):
+    # The token proves identity "otheruser"; the map translates that to the
+    # requested role "oauthuser", so login succeeds.
+    await set_hba(
+        oauth_hba_bouncer,
+        "host all all all oauth map=mymap",
+        ident="mymap otheruser oauthuser\n",
+    )
+    result = oauth_exchange(
+        oauth_hba_bouncer, "oauthuser", "p0a", oauth_initial_response("mismatchtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+    assert result["ready"] is True
+
+
+async def test_oauth_hba_usermap_no_match(oauth_hba_bouncer):
+    # The map has no entry for identity "otheruser" -> "oauthuser".
+    await set_hba(
+        oauth_hba_bouncer,
+        "host all all all oauth map=mymap",
+        ident="mymap someoneelse oauthuser\n",
+    )
+    result = oauth_exchange(
+        oauth_hba_bouncer, "oauthuser", "p0a", oauth_initial_response("mismatchtoken")
+    )
+    assert result["ok"] is False
+    assert result["error"] is not None
+    assert "does not match requested user" in result["error"]
+
+
+async def test_oauth_hba_map_delegate_conflict(oauth_hba_bouncer):
+    # map and delegate_ident_mapping are mutually exclusive; the login is
+    # rejected before the SASL exchange even begins.
+    await set_hba(
+        oauth_hba_bouncer,
+        "host all all all oauth map=mymap delegate_ident_mapping=1",
+        ident="mymap otheruser oauthuser\n",
+    )
+    client = RawClient(oauth_hba_bouncer.host, oauth_hba_bouncer.port)
+    try:
+        client.send_startup("oauthuser", "p0a")
+        typ, body = client.read_message()
+        assert typ == b"E", f"expected ErrorResponse, got {typ!r}"
+        assert "invalid oauth options" in _parse_error(body)
+    finally:
+        client.close()

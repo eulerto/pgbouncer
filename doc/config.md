@@ -1751,14 +1751,18 @@ The file follows the format of the PostgreSQL `pg_hba.conf` file
 * Address field: Supports `all`, IPv4, IPv6.  Not supported: `samehost`, `samenet`, DNS names, domain prefixes.
 * Auth-method field: Only methods supported by PgBouncer's `auth_type`
   are supported, plus `peer` and `reject`, but except `any` and `pam`, which only work globally.
-* User name map (`map=`) parameter is supported when `auth_type` is `cert` or `peer`.
+* User name map (`map=`) parameter is supported when `auth_type` is `cert`, `peer` or `oauth`.
 * The `oauth` method accepts per-line options after the method name, as
   `key=value` pairs (quote values that contain spaces, e.g. a scope, or a
-  URL).  Recognized keys are `issuer`, `scope` and `delegate_ident_mapping`;
-  each overrides the corresponding `oauth_*` global for connections matching
-  that rule.  Example:
+  URL).  Recognized keys are `issuer`, `scope`, `delegate_ident_mapping` and
+  `map`.  `issuer`, `scope` and `delegate_ident_mapping` each override the
+  corresponding `oauth_*` global for connections matching that rule.  `map`
+  names a usermap from the `auth_ident_file`: the identity the token proves is
+  matched as the system-username and the requested role as the
+  database-username.  `map` and `delegate_ident_mapping` are mutually
+  exclusive.  Example:
 
-      host all all 0.0.0.0/0 oauth issuer="https://issuer.example.com" scope="openid email"
+      host all all 0.0.0.0/0 oauth issuer="https://issuer.example.com" scope="openid email" map=oauthmap
 
 ## Ident map file format
 

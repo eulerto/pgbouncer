@@ -800,6 +800,7 @@ struct PgSocket {
 	char oauth_issuer[OAUTH_MAX_ISSUER];
 	char oauth_scope[OAUTH_MAX_SCOPE];
 	int oauth_delegate_ident_mapping;
+	char oauth_map[OAUTH_MAX_MAP];	/* pg_ident usermap name, or "" (default 1:1 check) */
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
@@ -966,6 +967,7 @@ extern usec_t g_suspend_start;
 
 extern struct DNSContext *adns;
 extern struct HBA *parsed_hba;
+extern struct Ident *parsed_ident;
 
 static inline PgSocket *first_socket(struct StatList *slist)
 {

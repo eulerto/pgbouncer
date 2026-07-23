@@ -987,6 +987,27 @@ static bool address_match(const struct HBAAddress *haddress, PgAddr *addr)
 	}
 }
 
+bool ident_map_check(struct Ident *ident, const char *mapname, const char *sys_user, const char *pg_user)
+{
+	struct IdentMap *map = NULL;
+	struct List *el;
+	struct Mapping *mapping;
+
+	if (!ident || !find_ident_map(ident, mapname, &map))
+		return false;
+
+	list_for_each(el, &map->mappings) {
+		mapping = container_of(el, struct Mapping, node);
+
+		if (strcmp(mapping->system_user_name, sys_user) != 0)
+			continue;
+		if ((mapping->name_flags & NAME_ALL) ||
+		    strcmp(mapping->postgres_user_name, pg_user) == 0)
+			return true;
+	}
+	return false;
+}
+
 struct HBARule * hba_eval(struct HBA *hba, PgAddr *addr, bool is_tls, ReplicationType replication, const char *dbname, const char *username)
 {
 	struct List *el;

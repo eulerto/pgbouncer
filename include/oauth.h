@@ -113,6 +113,9 @@ typedef struct OAuthValidatorCallbacks {
 /* Maximum length of a per-HBA-line oauth option string. */
 #define MAX_OAUTH_CONFIG 1024
 
+/* Maximum length of a pg_ident usermap name referenced by an oauth HBA line. */
+#define OAUTH_MAX_MAP 128
+
 /* Symbol every validator module must export. */
 #define OAUTH_VALIDATOR_INIT_SYMBOL "_pgbouncer_oauth_validator_module_init"
 
