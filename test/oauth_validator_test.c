@@ -57,14 +57,14 @@ int main(int argc, char *argv[])
 
 	/* Known-good token: authorized, identity "alice". */
 	memset(&result, 0, sizeof(result));
-	assert(cb->validate_cb(&state, "good-token", "alice", NULL, NULL, &result) == true);
+	assert(cb->validate_cb(&state, "good-token", "alice", NULL, NULL, 0, &result) == true);
 	assert(result.authorized == true);
 	assert(result.authn_id != NULL && strcmp(result.authn_id, "alice") == 0);
 	free(result.authn_id);
 
 	/* Unknown token: not authorized. */
 	memset(&result, 0, sizeof(result));
-	assert(cb->validate_cb(&state, "bad-token", "alice", NULL, NULL, &result) == true);
+	assert(cb->validate_cb(&state, "bad-token", "alice", NULL, NULL, 0, &result) == true);
 	assert(result.authorized == false);
 	assert(result.authn_id == NULL);
 	free(result.authn_id);

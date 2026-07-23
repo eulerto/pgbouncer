@@ -602,6 +602,19 @@ client is logging in as.
 
 Default: 0
 
+### oauth_validator_timeout
+
+Timeout (in seconds) handed to the validator module for verifying a single
+token, when `auth_type` is `oauth`.  Token validation runs on a background
+worker thread that PgBouncer cannot preempt, and a single worker serves all
+OAuth logins, so a validator that blocks on an unresponsive identity provider
+would stall every pending login.  The timeout is therefore *cooperative*:
+PgBouncer passes it to the module, and the module must apply it to its own
+network wait (for example libcurl `CURLOPT_TIMEOUT_MS`).  A value of 0 disables
+the timeout.
+
+Default: 10
+
 ## Log settings
 
 ### syslog

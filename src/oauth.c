@@ -73,6 +73,11 @@ struct oauth_auth_request {
 	char issuer[OAUTH_MAX_ISSUER];
 	char scope[OAUTH_MAX_SCOPE];
 
+	/* Cooperative validation timeout handed to the module, in
+	 * milliseconds (0 = no limit).  Copied from cf_oauth_validator_timeout
+	 * so the worker thread never reads live configuration. */
+	int timeout;
+
 	/* Result produced by the worker thread. */
 	bool authorized;
 	/* Identity proven by the token; malloc()'d by the validator module,
@@ -371,6 +376,7 @@ void oauth_auth_begin(PgSocket *client, const char *token)
 	safe_strcpy(request->token, token, sizeof(request->token));
 	safe_strcpy(request->issuer, client->oauth_issuer, sizeof(request->issuer));
 	safe_strcpy(request->scope, client->oauth_scope, sizeof(request->scope));
+	request->timeout = (int)(cf_oauth_validator_timeout / 1000);
 	request->authorized = false;
 	request->authn_id = NULL;
 
@@ -545,6 +551,7 @@ static bool check_oauth_auth(struct oauth_auth_request *request)
 					  request->username,
 					  request->issuer[0] ? request->issuer : NULL,
 					  request->scope[0] ? request->scope : NULL,
+					  request->timeout,
 					  &result)) {
 		log_warning("oauth: validator module failed to validate token for user \"%s\"",
 			    request->username);

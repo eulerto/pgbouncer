@@ -237,6 +237,19 @@ async def test_oauth_discovery_challenge(oauth_bouncer):
     assert "OAuth bearer token required" in result["error"]
 
 
+async def test_oauth_validator_timeout_setting(oauth_bouncer):
+    # The cooperative validation deadline is configurable and reloadable, and
+    # setting it must not disturb a normal (fast) validation.
+    oauth_bouncer.write_ini("oauth_validator_timeout = 3")
+    oauth_bouncer.admin("reload")
+    result = oauth_exchange(
+        oauth_bouncer, "oauthuser", "p0a", oauth_initial_response("validtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+    assert result["ready"] is True
+
+
 # -------------------------------------------------------------------
 # oauth as an HBA method with per-line options and pg_ident usermaps.
 # -------------------------------------------------------------------
