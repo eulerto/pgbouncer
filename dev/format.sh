@@ -31,6 +31,7 @@ UNCRUSTIFY=./uncrustify
 # with the UNCRUSTIFY_FILES list that the Makefile used.
 uncrustify_globs='
 	include/*.h src/*.c test/*.c
+	src/oauth-keycloak/*.c src/oauth-keycloak/*.h
 	lib/test/*.c lib/usual/*.c lib/usual/crypto/*.c lib/usual/hashing/*.c lib/usual/tls/*.c
 	lib/test/*.h lib/usual/*.h lib/usual/crypto/*.h lib/usual/hashing/*.h lib/usual/tls/*.h
 '
