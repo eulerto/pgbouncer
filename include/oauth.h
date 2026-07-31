@@ -36,16 +36,71 @@
  * Validator module ABI.
  *
  * A validator module is a shared library loaded at startup via the
- * oauth_validator_library setting.  It must export an initialization
+ * oauth_validator_libraries setting.  It must export an initialization
  * function named by OAUTH_VALIDATOR_INIT_SYMBOL that returns a pointer to a
  * static OAuthValidatorCallbacks whose magic field equals
  * OAUTH_VALIDATOR_MAGIC.  The ABI intentionally mirrors PostgreSQL's OAuth
  * validator interface so that validator logic can be shared.
+ *
+ * Several modules may be loaded at once.  Each declares a name, which both
+ * selects it from an HBA line (validator=<name>) and names its configuration
+ * section in pgbouncer.ini ([oauth:<name>]).
  */
+
+/*
+ * One key = value pair from the module's [oauth:<name>] configuration section.
+ * Both strings are owned by PgBouncer and stay valid for the life of the
+ * process; a module that keeps them past startup_cb need not copy them.
+ */
+typedef struct ValidatorOption {
+	const char *key;
+	const char *value;
+} ValidatorOption;
+
+/* Severity levels accepted by ValidatorLogCB. */
+#define OAUTH_LOG_ERROR   0
+#define OAUTH_LOG_WARNING 1
+#define OAUTH_LOG_INFO    2
+#define OAUTH_LOG_DEBUG   3
+
+struct ValidatorModuleState;
+
+/*
+ * Write a line to PgBouncer's log, tagged with the module's name.  A module
+ * should use this rather than stderr, which goes to /dev/null once PgBouncer
+ * daemonizes.  Safe to call from validate_cb on a worker thread.
+ */
+typedef void (*ValidatorLogCB)(struct ValidatorModuleState *state, int level,
+			       const char *fmt, ...)
+#ifdef __GNUC__
+/*
+ * Spelled out rather than through libusual's _PRINTF, since a validator
+ * module includes this header without being linked against libusual.
+ */
+__attribute__((format(printf, 3, 4)))
+#endif
+;
 
 typedef struct ValidatorModuleState {
 	/* Holds the server's PACKAGE_VERSION. Reserved for future extensibility. */
 	int sversion;
+
+	/* The name this module declared in OAuthValidatorCallbacks.name. */
+	const char *name;
+
+	/* Set by PgBouncer before startup_cb; never NULL. */
+	ValidatorLogCB log_cb;
+
+	/*
+	 * Options read from the module's [oauth:<name>] section, in file order;
+	 * noptions is 0 when the section is absent.  PgBouncer does not interpret
+	 * the keys: startup_cb should validate them and return false on anything
+	 * it does not recognize, so that a typo is a startup error rather than a
+	 * silently ignored setting.  The section is read once at startup; RELOAD
+	 * does not revisit it.
+	 */
+	const ValidatorOption *options;
+	int noptions;
 
 	/*
 	 * Private data pointer for use by a validator module. This can be used to
@@ -74,10 +129,12 @@ typedef struct ValidatorModuleResult {
 
 /*
  * Callbacks a validator module provides.  startup_cb and shutdown_cb run
- * once on the main thread at load and unload.  validate_cb runs on the
- * background worker thread and must be thread-safe and self-contained; it
- * returns false on an internal error (as opposed to a merely unauthorized
- * token, which is reported through result->authorized).
+ * once on the main thread at load and unload.  startup_cb reads the module's
+ * configuration out of state->options and returns false to reject it, which
+ * is a fatal startup error.  validate_cb runs on the background worker thread
+ * and must be thread-safe and self-contained; it returns false on an internal
+ * error (as opposed to a merely unauthorized token, which is reported through
+ * result->authorized).
  *
  * timeout (in milliseconds) that the module must apply to its own blocking
  * work (e.g. libcurl CURLOPT_TIMEOUT_MS); 0 means no limit.  PgBouncer runs
@@ -85,7 +142,7 @@ typedef struct ValidatorModuleResult {
  * timeout is the module responsibility: a validation that ignores it
  * head-of-line-blocks every other pending OAuth login.
  */
-typedef void (*ValidatorStartupCB) (ValidatorModuleState *state);
+typedef bool (*ValidatorStartupCB) (ValidatorModuleState *state);
 typedef void (*ValidatorShutdownCB) (ValidatorModuleState *state);
 typedef bool (*ValidatorValidateCB) (ValidatorModuleState *state,
 				     const char *token, const char *role,
@@ -97,10 +154,18 @@ typedef bool (*ValidatorValidateCB) (ValidatorModuleState *state,
  * Identifies the compiled ABI version of the validator module. Bump when the
  * callback struct layout or semantic changes.
  */
-#define OAUTH_VALIDATOR_MAGIC 0x20260702
+#define OAUTH_VALIDATOR_MAGIC 0x20260730
 
 typedef struct OAuthValidatorCallbacks {
 	uint32_t magic;		/* must be set to OAUTH_VALIDATOR_MAGIC */
+
+	/*
+	 * Name of this validator, used by the validator=<name> HBA option and by
+	 * the [oauth:<name>] configuration section.  Required, must be unique
+	 * among the loaded modules, and limited to letters, digits, '_', '-' and
+	 * '.' (at most OAUTH_MAX_VALIDATOR_NAME-1 characters).
+	 */
+	const char *name;
 
 	ValidatorStartupCB startup_cb;
 	ValidatorShutdownCB shutdown_cb;
@@ -122,6 +187,12 @@ typedef struct OAuthValidatorCallbacks {
 
 /* Maximum length of a pg_ident usermap name referenced by an oauth HBA line. */
 #define OAUTH_MAX_MAP 128
+
+/* Maximum length of a validator module name, including the NUL. */
+#define OAUTH_MAX_VALIDATOR_NAME 64
+
+/* Maximum number of validator modules oauth_validator_libraries may name. */
+#define OAUTH_MAX_MODULES 16
 
 /* Symbol every validator module must export. */
 #define OAUTH_VALIDATOR_INIT_SYMBOL "_pgbouncer_oauth_validator_module_init"

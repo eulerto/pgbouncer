@@ -8,6 +8,7 @@
 
 #include <assert.h>
 #include <dlfcn.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,12 +16,29 @@
 
 #include "oauth.h"
 
+/* Stand in for PgBouncer's logging, which the module expects to be there. */
+#ifdef __GNUC__
+/* Spelled out rather than through libusual's _PRINTF; see ValidatorLogCB. */
+__attribute__((format(printf, 3, 4)))
+#endif
+static void test_log(ValidatorModuleState *state, int level, const char *fmt, ...)
+{
+	va_list ap;
+
+	fprintf(stderr, "%s: ", state->name);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+}
+
 int main(int argc, char *argv[])
 {
 	void *handle;
 	OAuthValidatorModuleInit init_fn;
 	const OAuthValidatorCallbacks *cb;
 	ValidatorModuleState state;
+	ValidatorOption options[1];
 	ValidatorModuleResult result;
 	const char *sopath = argc > 1 ? argv[1] : "./oauth_validator.so";
 	FILE *f;
@@ -35,7 +53,6 @@ int main(int argc, char *argv[])
 	fputs("# token authn_id\n", f);
 	fputs("good-token alice\n", f);
 	fclose(f);
-	setenv("PGBOUNCER_OAUTH_VALIDATOR_TOKENS", tokfile, 1);
 
 	handle = dlopen(sopath, RTLD_NOW | RTLD_LOCAL);
 	if (!handle) {
@@ -49,11 +66,23 @@ int main(int argc, char *argv[])
 	cb = init_fn();
 	assert(cb != NULL);
 	assert(cb->magic == OAUTH_VALIDATOR_MAGIC);
+	assert(cb->name != NULL && cb->name[0] != '\0');
 	assert(cb->validate_cb != NULL);
 
+	/*
+	 * Hand the module its configuration the way PgBouncer does: the options
+	 * come from the [oauth:<name>] section of pgbouncer.ini.
+	 */
 	memset(&state, 0, sizeof(state));
+	state.name = cb->name;
+	state.log_cb = test_log;
+	options[0].key = "tokens";
+	options[0].value = tokfile;
+	state.options = options;
+	state.noptions = 1;
+
 	if (cb->startup_cb)
-		cb->startup_cb(&state);
+		assert(cb->startup_cb(&state) == true);
 
 	/* Known-good token: authorized, identity "alice". */
 	memset(&result, 0, sizeof(result));

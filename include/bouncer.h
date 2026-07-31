@@ -802,6 +802,12 @@ struct PgSocket {
 	char oauth_scope[OAUTH_MAX_SCOPE];
 	int oauth_delegate_ident_mapping;
 	char oauth_map[OAUTH_MAX_MAP];	/* pg_ident usermap name, or "" (default 1:1 check) */
+	/*
+	 * Index of the validator module that will check this client's token,
+	 * resolved on the main thread from the validator= HBA option (or the
+	 * single loaded module) before the token is queued.
+	 */
+	int oauth_module_idx;
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
@@ -906,7 +912,7 @@ extern char *cf_auth_user;
 extern char *cf_auth_hba_file;
 extern char *cf_auth_dbname;
 extern char *cf_auth_ldap_options;
-extern char *cf_oauth_validator_library;
+extern char *cf_oauth_validator_libraries;
 extern char *cf_oauth_issuer;
 extern char *cf_oauth_scope;
 extern int cf_oauth_delegate_ident_mapping;

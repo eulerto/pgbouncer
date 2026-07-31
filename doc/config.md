@@ -497,14 +497,15 @@ pam
 oauth
 :   Clients authenticate with an OAuth 2.0 bearer token using the
     `OAUTHBEARER` SASL mechanism, and the token is verified by the validator
-    module configured with `oauth_validator_library`.  `auth_file` is not
+    module configured with `oauth_validator_libraries`.  `auth_file` is not
     used for the client token, but the connection to PostgreSQL still uses a
     stored credential obtained from `auth_file` or `auth_query` (as with
     `cert` authentication), so one of those must supply the server-side
     password.  Available only when PgBouncer is built with `--with-oauth`.
     Supported in the HBA configuration file, where the `oauth_issuer`,
     `oauth_scope` and `oauth_delegate_ident_mapping` globals can be overridden
-    per line (see [HBA file format](#hba-file-format)).
+    per line, and where `validator=` picks the validator module to use (see
+    [HBA file format](#hba-file-format)).
 
 ### auth_hba_file
 
@@ -568,12 +569,20 @@ authentication is configured via `auth_hba_file`.)  Example:
 
     auth_ldap_options = ldapurl="ldap://127.0.0.1:12345/dc=example,dc=net?uid?sub"
 
-### oauth_validator_library
+### oauth_validator_libraries
 
-Path to the validator module (a shared library) that verifies OAuth bearer
-tokens when `auth_type` is `oauth`.  The module is loaded once at startup and
-must export the validator interface described in `doc/oauth.md`.  Required for
-`oauth` authentication.  Changing it requires a restart.
+Comma-separated list of validator modules (shared libraries) that verify OAuth
+bearer tokens when `auth_type` is `oauth`.  Each module is loaded once at
+startup and must export the validator interface described in `doc/oauth.md`.
+Required for `oauth` authentication.  Changing it requires a restart.
+
+Every module declares a name of its own.  That name selects it from an HBA
+line with `validator=` and names its configuration section (see
+[Validator module settings](#validator-module-settings) below).  When only one
+module is loaded it is used by default, so `validator=` is only required when
+several are listed here.
+
+    oauth_validator_libraries = /usr/lib/pgbouncer/keycloak.so, /usr/lib/pgbouncer/entra.so
 
 Default: not set
 
@@ -1658,6 +1667,33 @@ when the backing Postgres server slow or down.  So it's important for
 If not set, the `default_pool_size` is used.
 
 
+## Validator module settings
+
+Sections named `[oauth:<name>]` hold the settings of an OAuth validator module
+loaded through `oauth_validator_libraries`, where `<name>` is the name the
+module declares for itself.  For example, a module that calls itself `keycloak`
+reads:
+
+    [oauth:keycloak]
+    url = https://kc.example.com/realms/prod
+    client_id = pgbouncer
+
+PgBouncer does not interpret these keys.  It reads the section as plain
+key/value strings and hands them to the module when the module is loaded, which
+necessarily happens after the configuration file has been parsed.  Which keys
+exist, which are required, and what their values mean is up to the module, and
+so is rejecting the ones it does not recognize — a module that refuses its
+configuration prevents PgBouncer from starting.
+
+A section whose name does not match any loaded module is ignored with a
+warning, since the name can only be checked once the modules are loaded.
+
+Like the settings that control module loading, these sections are read once at
+startup: `RELOAD` does not revisit them, and changing them requires a restart.
+They are not shown by `SHOW CONFIG`, which would expose any credentials they
+carry to every console user.
+
+
 ## Include directive
 
 The PgBouncer configuration file can contain include directives, which specify
@@ -1779,15 +1815,20 @@ The file follows the format of the PostgreSQL `pg_hba.conf` file
 * User name map (`map=`) parameter is supported when `auth_type` is `cert`, `peer` or `oauth`.
 * The `oauth` method accepts per-line options after the method name, as
   `key=value` pairs (quote values that contain spaces, e.g. a scope, or a
-  URL).  Recognized keys are `issuer`, `scope`, `delegate_ident_mapping` and
-  `map`.  `issuer`, `scope` and `delegate_ident_mapping` each override the
-  corresponding `oauth_*` global for connections matching that rule.  `map`
-  names a usermap from the `auth_ident_file`: the identity the token proves is
-  matched as the system-username and the requested role as the
+  URL).  Recognized keys are `issuer`, `scope`, `delegate_ident_mapping`,
+  `map` and `validator`.  `issuer`, `scope` and `delegate_ident_mapping` each
+  override the corresponding `oauth_*` global for connections matching that
+  rule.  `map` names a usermap from the `auth_ident_file`: the identity the
+  token proves is matched as the system-username and the requested role as the
   database-username.  `map` and `delegate_ident_mapping` are mutually
-  exclusive.  Example:
+  exclusive.  `validator` names which of the modules in
+  `oauth_validator_libraries` verifies the token; it may be omitted when only
+  one module is loaded, and is required otherwise.  Because the HBA file is
+  parsed before the modules are loaded, a `validator` naming a module that is
+  not loaded is only detected when a client matching the rule logs in, and
+  fails that login.  Example:
 
-      host all all 0.0.0.0/0 oauth issuer="https://issuer.example.com" scope="openid email" map=oauthmap
+      host all all 0.0.0.0/0 oauth validator=keycloak issuer="https://issuer.example.com" scope="openid email" map=oauthmap
 
 ## Ident map file format
 

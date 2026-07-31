@@ -32,6 +32,8 @@
 #include <pthread.h>
 #include <dlfcn.h>
 
+#include <usual/err.h>
+
 /* The request is waiting in the queue or being validated */
 #define OAUTH_STATUS_IN_PROGRESS  1
 /* The token was successfully validated and authorized */
@@ -45,6 +47,21 @@
  * Default is 100 milliseconds.
  */
 #define OAUTH_QUEUE_WAIT_SLEEP_MCS      (100*1000)
+
+/*
+ * One loaded validator module.  Several may be loaded at once; an HBA line
+ * picks one with validator=<name>.
+ */
+struct oauth_module {
+	/* Path as it appeared in oauth_validator_libraries. */
+	char *path;
+	void *handle;
+	const OAuthValidatorCallbacks *cb;
+	/* State handed to every callback, including the module's settings. */
+	ValidatorModuleState *state;
+	/* Backing array for state->options; points into the parsed config. */
+	ValidatorOption *options;
+};
 
 struct oauth_auth_request {
 	/* The socket we check authentication for */
@@ -76,6 +93,12 @@ struct oauth_auth_request {
 	char token[OAUTH_MAX_TOKEN];
 	char issuer[OAUTH_MAX_ISSUER];
 	char scope[OAUTH_MAX_SCOPE];
+
+	/* Validator module handling this request, resolved by the main thread in
+	 * oauth_auth_begin().  Modules are loaded once at startup and never
+	 * unloaded, so the pointer stays valid for the worker.
+	 */
+	struct oauth_module *module;
 
 	/* Cooperative validation timeout handed to the module, in
 	 * milliseconds (0 = no limit).  Copied from cf_oauth_validator_timeout
@@ -119,10 +142,9 @@ static int oauth_num_workers;
 pthread_mutex_t oauth_queue_tail_mutex;
 pthread_cond_t oauth_data_available;
 
-/* The loaded validator module. */
-static ValidatorModuleState *validator_module_state;
-static void *oauth_module_handle;
-static const OAuthValidatorCallbacks *oauth_callbacks;
+/* The loaded validator modules, in oauth_validator_libraries order. */
+static struct oauth_module oauth_modules[OAUTH_MAX_MODULES];
+static int oauth_nmodules;
 
 /* Forward declarations */
 static void *oauth_auth_worker(void *arg);
@@ -131,23 +153,49 @@ static void oauth_auth_finish(struct oauth_auth_request *request, int status);
 static bool check_oauth_auth(struct oauth_auth_request *request);
 static int get_request_status(struct oauth_auth_request *request);
 static void set_request_status(struct oauth_auth_request *request, int status);
-static void load_validator_module(void);
+static void load_validator_modules(void);
+static void shutdown_validator_modules(void);
+static int oauth_find_module(const char *name);
 
 /*
- * Initialize the OAuth subsystem: load the validator module and start the
- * validation worker thread.  A no-op if no validator library is configured.
+ * Initialize the OAuth subsystem: load the validator modules and start the
+ * validation worker threads.  A no-op if no validator library is configured.
  */
 void oauth_init(void)
 {
+	struct CustomConfig *sect;
 	int rc;
 
-	if (!cf_oauth_validator_library) {
+	if (!cf_oauth_validator_libraries) {
 		if (cf_auth_type == AUTH_TYPE_OAUTH)
-			die("auth_type=oauth requires oauth_validator_library to be set");
+			die("auth_type=oauth requires oauth_validator_libraries to be set");
 		return;
 	}
 
-	load_validator_module();
+	load_validator_modules();
+	if (oauth_nmodules == 0)
+		die("oauth_validator_libraries names no validator module");
+
+	/*
+	 * Let the modules release whatever startup_cb acquired.  Registered here
+	 * rather than called from main.c's cleanup(), which only runs in builds
+	 * with asserts enabled; being registered after that handler also means it
+	 * runs before it, while the configuration the modules were handed is
+	 * still around.
+	 */
+	atexit(shutdown_validator_modules);
+
+	/*
+	 * A section no loaded module claims is almost always a typo in the name,
+	 * and would otherwise be silently ignored: the section is parsed long
+	 * before any module can say which names exist.
+	 */
+	for (sect = custcfg_first(); sect; sect = sect->next) {
+		if (strcmp(sect->prefix, "oauth") == 0 && oauth_find_module(sect->name) < 0) {
+			log_warning("no validator module named \"%s\" is loaded, ignoring section [oauth:%s]",
+				    sect->name, sect->name);
+		}
+	}
 
 	oauth_first_taken_slot = 0;
 	oauth_first_free_slot = 0;
@@ -185,55 +233,220 @@ void oauth_init(void)
 }
 
 /*
- * Load and initialize the validator module named by oauth_validator_library.
- * Any failure is fatal, as it is a configuration error.
+ * Log on a module's behalf.  Modules cannot use PgBouncer's own logging
+ * (they are not linked against it), and their stderr goes to /dev/null once
+ * PgBouncer daemonizes, so route their messages through here, tagged with the
+ * module name.  May be called from a validation worker thread.
  */
-static void load_validator_module(void)
+static void oauth_module_log(ValidatorModuleState *state, int level, const char *fmt, ...) _PRINTF(3, 4);
+
+static void oauth_module_log(ValidatorModuleState *state, int level, const char *fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	switch (level) {
+	case OAUTH_LOG_ERROR:
+		log_error("oauth: %s: %s", state->name, buf);
+		break;
+	case OAUTH_LOG_WARNING:
+		log_warning("oauth: %s: %s", state->name, buf);
+		break;
+	case OAUTH_LOG_DEBUG:
+		log_debug("oauth: %s: %s", state->name, buf);
+		break;
+	default:
+		log_info("oauth: %s: %s", state->name, buf);
+		break;
+	}
+}
+
+/* Return the index of the module declaring this name, or -1. */
+static int oauth_find_module(const char *name)
+{
+	int i;
+
+	for (i = 0; i < oauth_nmodules; i++) {
+		if (strcmp(oauth_modules[i].cb->name, name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Collect the module's [oauth:<name>] settings into the array handed to it
+ * through its state.  The strings belong to the parsed configuration, which
+ * is frozen once loaded (see include/custcfg.h), so the module may hold on to
+ * them.
+ */
+static void attach_module_config(struct oauth_module *mod)
+{
+	struct CustomConfig *sect = custcfg_find("oauth", mod->cb->name);
+	struct CustomOption *opt;
+	int i = 0;
+
+	if (!sect || sect->noptions == 0)
+		return;
+
+	mod->options = xmalloc(sect->noptions * sizeof(*mod->options));
+	for (opt = sect->options; opt; opt = opt->next) {
+		mod->options[i].key = opt->key;
+		mod->options[i].value = opt->value;
+		i++;
+	}
+
+	mod->state->options = mod->options;
+	mod->state->noptions = i;
+}
+
+/*
+ * Load and initialize one validator module.  Any failure is fatal, as it is a
+ * configuration error.
+ */
+static void load_validator_module(const char *path)
 {
 	OAuthValidatorModuleInit init_fn;
 	const OAuthValidatorCallbacks *cb;
+	struct oauth_module *mod;
 	const char *err;
+	void *handle;
 
-	oauth_module_handle = dlopen(cf_oauth_validator_library, RTLD_NOW | RTLD_LOCAL);
-	if (!oauth_module_handle) {
-		die("could not load oauth_validator_library \"%s\": %s",
-		    cf_oauth_validator_library, dlerror());
-	}
+	handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (!handle)
+		die("could not load validator module \"%s\": %s", path, dlerror());
 
 	/* Clear any stale error before resolving the symbol. */
 	dlerror();
 	/* The cast via a void* pointer avoids the ISO C object/function
 	 * pointer-cast warning; POSIX guarantees dlsym returns a usable
 	 * function pointer here. */
-	*(void **)(&init_fn) = dlsym(oauth_module_handle, OAUTH_VALIDATOR_INIT_SYMBOL);
+	*(void **)(&init_fn) = dlsym(handle, OAUTH_VALIDATOR_INIT_SYMBOL);
 	err = dlerror();
 	if (err != NULL || init_fn == NULL) {
 		die("validator module \"%s\" is missing symbol %s: %s",
-		    cf_oauth_validator_library, OAUTH_VALIDATOR_INIT_SYMBOL,
-		    err ? err : "not found");
+		    path, OAUTH_VALIDATOR_INIT_SYMBOL, err ? err : "not found");
 	}
 
 	cb = init_fn();
 	if (!cb)
-		die("validator module \"%s\" returned no callbacks", cf_oauth_validator_library);
+		die("validator module \"%s\" returned no callbacks", path);
 	if (cb->magic != OAUTH_VALIDATOR_MAGIC) {
 		die("validator module \"%s\" has wrong magic 0x%08x (expected 0x%08x)",
-		    cf_oauth_validator_library, cb->magic, OAUTH_VALIDATOR_MAGIC);
+		    path, cb->magic, OAUTH_VALIDATOR_MAGIC);
 	}
-	if (!cb->validate_cb) {
-		die("validator module \"%s\" provides no validate callback",
-		    cf_oauth_validator_library);
+	if (!cb->validate_cb)
+		die("validator module \"%s\" provides no validate callback", path);
+
+	/*
+	 * The name is how an HBA line and a configuration section refer to this
+	 * module, so it must exist, fit, and be unambiguous.
+	 */
+	if (!cb->name || !cb->name[0])
+		die("validator module \"%s\" declares no name", path);
+	if (strlen(cb->name) >= OAUTH_MAX_VALIDATOR_NAME) {
+		die("validator module \"%s\" declares a name longer than %d characters",
+		    path, OAUTH_MAX_VALIDATOR_NAME - 1);
+	}
+	if (oauth_find_module(cb->name) >= 0) {
+		die("validator module \"%s\" declares name \"%s\", which is already used by another module",
+		    path, cb->name);
 	}
 
-	oauth_callbacks = cb;
+	mod = &oauth_modules[oauth_nmodules];
+	mod->path = xstrdup(path);
+	mod->handle = handle;
+	mod->cb = cb;
+	mod->state = xmalloc(sizeof(*mod->state));
+	memset(mod->state, 0, sizeof(*mod->state));
+	mod->state->name = cb->name;
+	mod->state->log_cb = oauth_module_log;
 
-	/* Allocate memory for validator library private state data */
-	validator_module_state = malloc(sizeof(ValidatorModuleState));
+	attach_module_config(mod);
 
-	if (cb->startup_cb)
-		cb->startup_cb(validator_module_state);
+	if (cb->startup_cb && !cb->startup_cb(mod->state))
+		die("validator module \"%s\" (\"%s\") failed to start", cb->name, path);
 
-	log_info("loaded OAuth validator module \"%s\"", cf_oauth_validator_library);
+	oauth_nmodules++;
+
+	log_info("loaded OAuth validator module \"%s\" from \"%s\" (%d option(s))",
+		 cb->name, path, mod->state->noptions);
+}
+
+/*
+ * Load every module named by oauth_validator_libraries, a comma-separated
+ * list of paths.
+ */
+static void load_validator_modules(void)
+{
+	char *list = xstrdup(cf_oauth_validator_libraries);
+	char *pos = list;
+	char *path;
+
+	while ((path = strsep(&pos, ",")) != NULL) {
+		while (*path && isspace((unsigned char)*path))
+			path++;
+		{
+			char *end = path + strlen(path);
+
+			while (end > path && isspace((unsigned char)end[-1]))
+				end--;
+			*end = '\0';
+		}
+		if (!*path)
+			continue;
+
+		if (oauth_nmodules == OAUTH_MAX_MODULES) {
+			die("oauth_validator_libraries names more than %d modules",
+			    OAUTH_MAX_MODULES);
+		}
+		load_validator_module(path);
+	}
+
+	free(list);
+}
+
+/*
+ * Call every loaded module's shutdown_cb, at exit.  Runs on the main thread
+ * once the event loop is gone.
+ */
+static void shutdown_validator_modules(void)
+{
+	int i;
+
+	/*
+	 * A request still occupying the ring is inside validate_cb on a worker
+	 * thread, or about to be: a slot is released only after its result was
+	 * reaped.  The workers are not joined here, and tearing a module down
+	 * underneath its own validation is worse than not tearing it down at
+	 * all, so leave it to the exiting process.
+	 */
+	if (oauth_first_taken_slot != oauth_first_free_slot) {
+		log_warning("oauth: token validation still in progress, skipping validator module shutdown");
+		return;
+	}
+
+	for (i = 0; i < oauth_nmodules; i++) {
+		struct oauth_module *mod = &oauth_modules[i];
+
+		if (mod->cb->shutdown_cb)
+			mod->cb->shutdown_cb(mod->state);
+
+		/*
+		 * The library stays mapped: the worker threads are still alive,
+		 * and unloading it buys nothing in a process that is exiting.
+		 */
+		free(mod->options);
+		free(mod->state);
+		free(mod->path);
+		mod->options = NULL;
+		mod->state = NULL;
+		mod->path = NULL;
+	}
+	oauth_nmodules = 0;
 }
 
 static int get_request_status(struct oauth_auth_request *request)
@@ -316,6 +529,7 @@ static bool oauth_next_option(char **pos, char **key, char **val, bool *ok)
 bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 {
 	char buf[MAX_OAUTH_CONFIG];
+	char validator[OAUTH_MAX_VALIDATOR_NAME];
 	char *pos, *key, *val;
 	bool ok = true;
 
@@ -324,9 +538,16 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 	safe_strcpy(client->oauth_scope, cf_oauth_scope ? cf_oauth_scope : "", sizeof(client->oauth_scope));
 	client->oauth_delegate_ident_mapping = cf_oauth_delegate_ident_mapping;
 	client->oauth_map[0] = '\0';
+	client->oauth_module_idx = -1;
+	validator[0] = '\0';
+
+	if (oauth_nmodules == 0) {
+		log_warning("oauth: no validator module is loaded, set oauth_validator_libraries");
+		return false;
+	}
 
 	if (!hba_options || !hba_options[0])
-		return true;
+		goto pick_module;
 
 	safe_strcpy(buf, hba_options, sizeof(buf));
 	pos = buf;
@@ -340,6 +561,8 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 				(strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
 		} else if (strcmp(key, "map") == 0) {
 			safe_strcpy(client->oauth_map, val, sizeof(client->oauth_map));
+		} else if (strcmp(key, "validator") == 0) {
+			safe_strcpy(validator, val, sizeof(validator));
 		} else {
 			log_warning("invalid oauth HBA option: \"%s\"", key);
 			return false;
@@ -347,6 +570,26 @@ bool oauth_prepare_options(PgSocket *client, const char *hba_options)
 	}
 	if (!ok) {
 		log_warning("malformed oauth HBA options: \"%s\"", hba_options);
+		return false;
+	}
+
+pick_module:
+	/*
+	 * Pick the validator module for this login.  The modules are loaded once
+	 * at startup, long after the HBA file was parsed, so an unknown name can
+	 * only be caught here; refuse the login rather than guess.
+	 */
+	if (validator[0]) {
+		client->oauth_module_idx = oauth_find_module(validator);
+		if (client->oauth_module_idx < 0) {
+			log_warning("oauth: no validator module named \"%s\" is loaded", validator);
+			return false;
+		}
+	} else if (oauth_nmodules == 1) {
+		client->oauth_module_idx = 0;
+	} else {
+		log_warning("oauth: the \"validator\" HBA option is required when %d validator modules are loaded",
+			    oauth_nmodules);
 		return false;
 	}
 
@@ -401,6 +644,7 @@ void oauth_auth_begin(PgSocket *client, const char *token)
 	safe_strcpy(request->token, token, sizeof(request->token));
 	safe_strcpy(request->issuer, client->oauth_issuer, sizeof(request->issuer));
 	safe_strcpy(request->scope, client->oauth_scope, sizeof(request->scope));
+	request->module = &oauth_modules[client->oauth_module_idx];
 	request->timeout = (int)(cf_oauth_validator_timeout / 1000);
 	request->authorized = false;
 	request->authn_id = NULL;
@@ -587,6 +831,7 @@ static void oauth_auth_finish(struct oauth_auth_request *request, int status)
  */
 static bool check_oauth_auth(struct oauth_auth_request *request)
 {
+	const struct oauth_module *mod = request->module;
 	ValidatorModuleResult result;
 
 	if (request->token[0] == '\0')
@@ -594,15 +839,15 @@ static bool check_oauth_auth(struct oauth_auth_request *request)
 
 	memset(&result, 0, sizeof(result));
 
-	if (!oauth_callbacks->validate_cb(validator_module_state,
-					  request->token,
-					  request->username,
-					  request->issuer[0] ? request->issuer : NULL,
-					  request->scope[0] ? request->scope : NULL,
-					  request->timeout,
-					  &result)) {
-		log_warning("oauth: validator module failed to validate token for user \"%s\"",
-			    request->username);
+	if (!mod->cb->validate_cb(mod->state,
+				  request->token,
+				  request->username,
+				  request->issuer[0] ? request->issuer : NULL,
+				  request->scope[0] ? request->scope : NULL,
+				  request->timeout,
+				  &result)) {
+		log_warning("oauth: validator module \"%s\" failed to validate token for user \"%s\"",
+			    mod->cb->name, request->username);
 		free(result.authn_id);
 		return false;
 	}

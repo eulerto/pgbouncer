@@ -126,7 +126,7 @@ char *cf_auth_ldap_options;
 char *cf_auth_user;
 char *cf_auth_query;
 char *cf_auth_dbname;
-char *cf_oauth_validator_library;
+char *cf_oauth_validator_libraries;
 char *cf_oauth_issuer;
 char *cf_oauth_scope;
 int cf_oauth_delegate_ident_mapping;
@@ -323,7 +323,7 @@ static const struct CfKey bouncer_params [] = {
 	CF_ABS("oauth_delegate_ident_mapping", CF_INT, cf_oauth_delegate_ident_mapping, 0, "0"),
 	CF_ABS("oauth_issuer", CF_STR, cf_oauth_issuer, 0, NULL),
 	CF_ABS("oauth_scope", CF_STR, cf_oauth_scope, 0, NULL),
-	CF_ABS("oauth_validator_library", CF_STR, cf_oauth_validator_library, CF_NO_RELOAD, NULL),
+	CF_ABS("oauth_validator_libraries", CF_STR, cf_oauth_validator_libraries, CF_NO_RELOAD, NULL),
 	CF_ABS("oauth_validator_timeout", CF_TIME_USEC, cf_oauth_validator_timeout, 0, "10"),
 	CF_ABS("oauth_validator_workers", CF_INT, cf_oauth_validator_workers, CF_NO_RELOAD, "1"),
 	CF_ABS("peer_id", CF_INT, cf_peer_id, 0, "0"),
@@ -1029,7 +1029,7 @@ static void cleanup(void)
 	xfree(&cf_auth_dbname);
 	xfree(&cf_auth_hba_file);
 	xfree(&cf_auth_ldap_options);
-	xfree(&cf_oauth_validator_library);
+	xfree(&cf_oauth_validator_libraries);
 	xfree(&cf_oauth_issuer);
 	xfree(&cf_oauth_scope);
 	xfree(&cf_auth_query);
