@@ -6,6 +6,7 @@ bin_PROGRAMS = pgbouncer
 pgbouncer_SOURCES = \
 	src/admin.c \
 	src/client.c \
+	src/custcfg.c \
 	src/dnslookup.c \
 	src/hba.c \
 	src/janitor.c \
@@ -42,6 +43,7 @@ pgbouncer_SOURCES = \
 	include/admin.h \
 	include/bouncer.h \
 	include/client.h \
+	include/custcfg.h \
 	include/dnslookup.h \
 	include/hba.h \
 	include/iobuf.h \

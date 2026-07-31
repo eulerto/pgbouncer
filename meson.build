@@ -576,6 +576,7 @@ libusual_sources = files(
 pgbouncer_sources = files(
   'src/admin.c',
   'src/client.c',
+  'src/custcfg.c',
   'src/dnslookup.c',
   'src/hba.c',
   'src/janitor.c',

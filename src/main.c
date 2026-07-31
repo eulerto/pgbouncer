@@ -402,6 +402,18 @@ static const struct CfSect config_sects [] = {
 		.sect_name = "peers",
 		.set_key = parse_peer,
 	}, {
+		/*
+		 * Trailing catch-all: settings PgBouncer does not own, in
+		 * sections named "<prefix>:<name>" (see include/custcfg.h).  It
+		 * must stay last, as find_sect() takes the first matching entry,
+		 * and it still rejects names that are not custom sections.
+		 */
+		.sect_name = "*",
+		.base_lookup = custcfg_section_base,
+		.set_key = custcfg_set_key,
+		.get_key = custcfg_get_key,
+		.section_start = custcfg_section_start,
+	}, {
 		.sect_name = NULL,
 	}
 };
@@ -997,6 +1009,7 @@ static void cleanup(void)
 	admin_cleanup();
 	objects_cleanup();
 	sbuf_cleanup();
+	custcfg_cleanup();
 
 	event_base_free(pgb_event_base);
 
@@ -1128,6 +1141,8 @@ int main(int argc, char *argv[])
 	init_objects();
 	load_config();
 	main_config.loaded = true;
+	/* custom sections, like the CF_NO_RELOAD settings, are now fixed */
+	custcfg_lock();
 	init_var_lookup(cf_track_extra_parameters);
 	init_caches();
 	logging_prefix_cb = log_socket_prefix;

@@ -187,6 +187,7 @@ extern int cf_sbuf_len;
 #include "stats.h"
 #include "takeover.h"
 #include "janitor.h"
+#include "custcfg.h"
 #include "hba.h"
 #include "ldapauth.h"
 #include "messages.h"
