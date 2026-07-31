@@ -7,6 +7,7 @@ configured with the example validator module in test/oauth_validator.c, which
 resolves bearer tokens against a flat file.
 """
 
+import asyncio
 import socket
 import struct
 import subprocess
@@ -128,21 +129,23 @@ def oauth_exchange(bouncer, user, database, initial_response):
         client.close()
 
 
-def build_validator(tmp_path):
-    """Compile the example validator module to a shared object."""
-    so_path = tmp_path / "oauth_validator.so"
-    subprocess.run(
-        [
-            "cc",
-            "-shared",
-            "-fPIC",
-            f"-I{TEST_DIR / '..' / 'include'}",
-            "-o",
-            str(so_path),
-            str(TEST_DIR / "oauth_validator.c"),
-        ],
-        check=True,
-    )
+def build_validator(tmp_path, name=None):
+    """Compile the example validator module to a shared object.
+
+    With a name, the module is built declaring that name instead of "example",
+    which gives the tests a second, distinctly named validator to load.
+    """
+    so_path = tmp_path / f"oauth_validator_{name or 'example'}.so"
+    cmd = [
+        "cc",
+        "-shared",
+        "-fPIC",
+        f"-I{TEST_DIR / '..' / 'include'}",
+    ]
+    if name:
+        cmd.append(f'-DVALIDATOR_NAME="{name}"')
+    cmd += ["-o", str(so_path), str(TEST_DIR / "oauth_validator.c")]
+    subprocess.run(cmd, check=True)
     return so_path
 
 
@@ -167,7 +170,7 @@ async def oauth_bouncer(bouncer, pg, tmp_path, monkeypatch):
         f.write('"oauthuser" "unused"\n')
 
     bouncer.write_ini("auth_type = oauth")
-    bouncer.write_ini(f"oauth_validator_library = {validator}")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
     bouncer.write_ini("oauth_issuer = https://issuer.example.com")
     bouncer.write_ini("oauth_scope = openid email")
     await bouncer.restart()
@@ -256,7 +259,7 @@ async def test_oauth_validator_worker_pool(oauth_bouncer):
     # the out-of-order reap/reclaim in oauth_poll()).
     oauth_bouncer.write_ini("oauth_validator_workers = 4")
     await oauth_bouncer.restart()
-    assert "started 4 OAuth validation workers" in oauth_bouncer.log_path.read_text()
+    assert "number of OAuth validation workers: 4" in oauth_bouncer.log_path.read_text()
 
     for token, expect_ok in [
         ("validtoken", True),
@@ -316,7 +319,7 @@ async def oauth_hba_bouncer(bouncer, pg, tmp_path, monkeypatch):
     _ident_path(bouncer).write_text("")
 
     bouncer.write_ini("auth_type = hba")
-    bouncer.write_ini(f"oauth_validator_library = {validator}")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
     bouncer.write_ini("oauth_issuer = https://global-issuer.example.com")
     bouncer.write_ini("oauth_scope = global-scope")
     bouncer.write_ini(f"auth_hba_file = {_hba_path(bouncer)}")
@@ -416,3 +419,163 @@ async def test_oauth_hba_map_delegate_conflict(oauth_hba_bouncer):
         assert "invalid oauth options" in _parse_error(body)
     finally:
         client.close()
+
+
+# -------------------------------------------------------------------
+# Custom configuration sections and selecting among several modules.
+# -------------------------------------------------------------------
+
+
+async def run_pgbouncer_expecting_failure(bouncer):
+    """Start PgBouncer in the foreground, expecting it to refuse the config.
+
+    Returns everything it said, on either stream and in its log file.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *bouncer.base_command(),
+        str(bouncer.ini_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    assert proc.returncode != 0
+    return stdout.decode() + stderr.decode() + bouncer.log_path.read_text()
+
+
+async def test_oauth_module_config_section(oauth_bouncer, tmp_path, monkeypatch):
+    # The module reads its token file from [oauth:example] instead of the
+    # environment, which only works if the section reached it intact.  The
+    # section is appended last: everything after it belongs to that section.
+    monkeypatch.delenv("PGBOUNCER_OAUTH_VALIDATOR_TOKENS")
+    oauth_bouncer.write_ini("[oauth:example]")
+    oauth_bouncer.write_ini(f"tokens = {tmp_path / 'tokens.txt'}")
+    await oauth_bouncer.restart()
+
+    log = oauth_bouncer.log_path.read_text()
+    assert 'loaded OAuth validator module "example"' in log
+    assert "(1 option(s))" in log
+
+    result = oauth_exchange(
+        oauth_bouncer, "oauthuser", "p0a", oauth_initial_response("validtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+
+
+async def test_oauth_module_config_unknown_option(oauth_bouncer, tmp_path):
+    # PgBouncer does not know what a module's keys mean, so it is the module
+    # that rejects a typo -- and a rejected startup_cb is fatal.
+    await oauth_bouncer.stop()
+    oauth_bouncer.write_ini("[oauth:example]")
+    oauth_bouncer.write_ini("bogus = 1")
+
+    output = await run_pgbouncer_expecting_failure(oauth_bouncer)
+    assert 'unrecognized option "bogus"' in output
+    assert "failed to start" in output
+
+
+async def test_oauth_module_config_unclaimed_section(oauth_bouncer, tmp_path):
+    # A section no loaded module answers to is a typo in the name; it cannot be
+    # detected while parsing (modules load later), so it is warned about.
+    oauth_bouncer.write_ini("[oauth:nosuchmodule]")
+    oauth_bouncer.write_ini("url = https://example.com")
+    await oauth_bouncer.restart()
+
+    log = oauth_bouncer.log_path.read_text()
+    assert 'no validator module named "nosuchmodule" is loaded' in log
+
+
+async def test_oauth_invalid_section_still_fatal(oauth_bouncer):
+    # Custom sections are matched by a catch-all entry in the parser; a section
+    # that is neither a core nor a custom section must stay a hard error.
+    await oauth_bouncer.stop()
+    oauth_bouncer.write_ini("[bogussection]")
+
+    output = await run_pgbouncer_expecting_failure(oauth_bouncer)
+    assert "unknown section: bogussection" in output
+
+
+@pytest.fixture
+async def oauth_two_validators(oauth_hba_bouncer, tmp_path, monkeypatch):
+    """Two validator modules, each with its own token file.
+
+    "example" accepts validtoken (identity oauthuser); "second" accepts
+    secondtoken (also oauthuser), so a successful login proves which module
+    was consulted.
+    """
+    monkeypatch.delenv("PGBOUNCER_OAUTH_VALIDATOR_TOKENS")
+    first = build_validator(tmp_path)
+    second = build_validator(tmp_path, name="second")
+
+    second_tokens = tmp_path / "tokens2.txt"
+    second_tokens.write_text("secondtoken oauthuser\n")
+
+    oauth_hba_bouncer.write_ini(f"oauth_validator_libraries = {first}, {second}")
+    oauth_hba_bouncer.write_ini("[oauth:example]")
+    oauth_hba_bouncer.write_ini(f"tokens = {tmp_path / 'tokens.txt'}")
+    oauth_hba_bouncer.write_ini("[oauth:second]")
+    oauth_hba_bouncer.write_ini(f"tokens = {second_tokens}")
+    await oauth_hba_bouncer.restart()
+
+    yield oauth_hba_bouncer
+
+
+async def test_oauth_two_validators_loaded(oauth_two_validators):
+    log = oauth_two_validators.log_path.read_text()
+    assert 'loaded OAuth validator module "example"' in log
+    assert 'loaded OAuth validator module "second"' in log
+
+
+async def test_oauth_validator_selected_per_hba_line(oauth_two_validators):
+    await set_hba(oauth_two_validators, "host all all all oauth validator=second")
+
+    # Only the second module knows this token.
+    result = oauth_exchange(
+        oauth_two_validators, "oauthuser", "p0a", oauth_initial_response("secondtoken")
+    )
+    assert result["error"] is None, result["error"]
+    assert result["ok"] is True
+
+    # The first module's token must not be accepted by the second.
+    result = oauth_exchange(
+        oauth_two_validators, "oauthuser", "p0a", oauth_initial_response("validtoken")
+    )
+    assert result["ok"] is False
+    assert "OAuth authentication failed" in result["error"]
+
+
+async def test_oauth_validator_unknown_name(oauth_two_validators):
+    # The HBA file is parsed before modules are loaded, so a bad name can only
+    # be caught at login time -- and it must fail the login, not fall back.
+    await set_hba(oauth_two_validators, "host all all all oauth validator=nosuch")
+
+    client = RawClient(oauth_two_validators.host, oauth_two_validators.port)
+    try:
+        client.send_startup("oauthuser", "p0a")
+        typ, body = client.read_message()
+        assert typ == b"E", f"expected ErrorResponse, got {typ!r}"
+        assert "invalid oauth options" in _parse_error(body)
+    finally:
+        client.close()
+    assert (
+        'no validator module named "nosuch" is loaded'
+        in oauth_two_validators.log_path.read_text()
+    )
+
+
+async def test_oauth_validator_required_when_ambiguous(oauth_two_validators):
+    # With more than one module loaded there is no sensible default.
+    await set_hba(oauth_two_validators, "host all all all oauth")
+
+    client = RawClient(oauth_two_validators.host, oauth_two_validators.port)
+    try:
+        client.send_startup("oauthuser", "p0a")
+        typ, body = client.read_message()
+        assert typ == b"E", f"expected ErrorResponse, got {typ!r}"
+        assert "invalid oauth options" in _parse_error(body)
+    finally:
+        client.close()
+    assert (
+        'the "validator" HBA option is required'
+        in oauth_two_validators.log_path.read_text()
+    )
