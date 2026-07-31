@@ -584,6 +584,9 @@ several are listed here.
 
     oauth_validator_libraries = /usr/lib/pgbouncer/keycloak.so, /usr/lib/pgbouncer/entra.so
 
+A validator module for Keycloak ships in `src/oauth-keycloak`; it is built
+separately from PgBouncer itself.
+
 Default: not set
 
 ### oauth_issuer

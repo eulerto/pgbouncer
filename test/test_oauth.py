@@ -579,3 +579,120 @@ async def test_oauth_validator_required_when_ambiguous(oauth_two_validators):
         'the "validator" HBA option is required'
         in oauth_two_validators.log_path.read_text()
     )
+
+
+# -------------------------------------------------------------------
+# The Keycloak validator module (src/oauth-keycloak).
+# -------------------------------------------------------------------
+
+KEYCLOAK_DIR = TEST_DIR / ".." / "src" / "oauth-keycloak"
+
+
+def build_keycloak_validator(tmp_path):
+    """Build the Keycloak module, or skip if its dependencies are missing."""
+    for pkg in ("libcurl", "jansson", "openssl"):
+        if subprocess.run(["pkg-config", "--exists", pkg], check=False).returncode != 0:
+            pytest.skip(f"{pkg} development files are not installed")
+
+    so_path = tmp_path / "keycloak.so"
+    cflags = subprocess.run(
+        ["pkg-config", "--cflags", "--libs", "libcurl", "jansson", "openssl"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    sources = [
+        str(KEYCLOAK_DIR / name)
+        for name in ("keycloak.c", "kc_crypto.c", "kc_http.c", "kc_jwt.c")
+    ]
+    subprocess.run(
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-pthread",
+            f"-I{TEST_DIR / '..' / 'include'}",
+            "-o",
+            str(so_path),
+            *sources,
+            *cflags,
+        ],
+        check=True,
+    )
+    return so_path
+
+
+@pytest.fixture
+async def keycloak_bouncer(bouncer, pg, tmp_path):
+    """PgBouncer with the Keycloak module loaded and configured.
+
+    No Keycloak is involved: the tests here cover the seam between PgBouncer
+    and the module (loading, naming, its [oauth:keycloak] section), while the
+    module's own token handling is tested by src/oauth-keycloak/kc_test.c.
+    """
+    validator = build_keycloak_validator(tmp_path)
+
+    pg.sql("drop role if exists oauthuser")
+    pg.sql("create user oauthuser")
+    with bouncer.auth_path.open("a") as f:
+        f.write('"oauthuser" "unused"\n')
+
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini("oauth_issuer = https://kc.example.test/realms/prod")
+    bouncer.write_ini("[oauth:keycloak]")
+    bouncer.write_ini("issuer = https://kc.example.test/realms/prod")
+    bouncer.write_ini("audience = pgbouncer")
+    await bouncer.restart()
+
+    yield bouncer
+
+
+async def test_keycloak_module_loads(keycloak_bouncer):
+    log = keycloak_bouncer.log_path.read_text()
+    # The module declares the name "keycloak" and finds its own section.
+    assert 'loaded OAuth validator module "keycloak"' in log
+    assert "(2 option(s))" in log
+    assert "keycloak: configured for issuer https://kc.example.test/realms/prod" in log
+    assert "mode=jwks" in log
+
+
+async def test_keycloak_rejects_unknown_setting(keycloak_bouncer):
+    await keycloak_bouncer.stop()
+    keycloak_bouncer.write_ini("nosuchsetting = 1")
+
+    output = await run_pgbouncer_expecting_failure(keycloak_bouncer)
+    assert 'unrecognized setting "nosuchsetting" in [oauth:keycloak]' in output
+    assert "failed to start" in output
+
+
+async def test_keycloak_requires_issuer(bouncer, pg, tmp_path):
+    validator = build_keycloak_validator(tmp_path)
+
+    await bouncer.stop()
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini("[oauth:keycloak]")
+    bouncer.write_ini("audience = pgbouncer")
+
+    output = await run_pgbouncer_expecting_failure(bouncer)
+    assert '"issuer" is required in [oauth:keycloak]' in output
+
+
+async def test_keycloak_introspect_needs_credentials(keycloak_bouncer):
+    await keycloak_bouncer.stop()
+    keycloak_bouncer.write_ini("mode = introspect")
+
+    output = await run_pgbouncer_expecting_failure(keycloak_bouncer)
+    assert "mode=introspect requires client_id and client_secret" in output
+
+
+async def test_keycloak_rejects_garbage_token(keycloak_bouncer):
+    # The JWKS endpoint does not exist, but a token that is not even a JWT is
+    # turned down before the module ever tries to reach it.
+    result = oauth_exchange(
+        keycloak_bouncer, "oauthuser", "p0a", oauth_initial_response("not-a-jwt")
+    )
+    assert result["ok"] is False
+    assert "OAuth authentication failed" in result["error"]
+    assert "token is not a JWT" in keycloak_bouncer.log_path.read_text()

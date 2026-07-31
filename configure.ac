@@ -122,6 +122,25 @@ AC_ARG_WITH(oauth,
         else
           AC_MSG_ERROR([dlopen is needed for OAuth compilation])
         fi
+
+        dnl The validator modules that ship with PgBouncer (src/oauth-keycloak)
+        dnl need libcurl and jansson.  The pgbouncer binary links neither -- it
+        dnl only dlopen()s the modules -- so save and restore LIBS around the
+        dnl probes instead of letting them add the libraries to every link.
+        have_libcurl=
+        have_jansson=
+        oauth_save_LIBS=$LIBS
+        AC_CHECK_HEADERS(curl/curl.h, [have_curl_header=t])
+        AC_SEARCH_LIBS(curl_easy_init, curl, [have_libcurl=t])
+        AC_CHECK_HEADERS(jansson.h, [have_jansson_header=t])
+        AC_SEARCH_LIBS(json_loads, jansson, [have_jansson=t])
+        LIBS=$oauth_save_LIBS
+        if test x"${have_curl_header}" = x -o x"${have_libcurl}" = x; then
+          AC_MSG_ERROR([libcurl and its development headers are needed for OAuth compilation])
+        fi
+        if test x"${have_jansson}" = x -o x"${have_jansson_header}" = x; then
+          AC_MSG_ERROR([jansson and its development headers are needed for OAuth compilation])
+        fi
     fi
   ], [])
 

@@ -21,6 +21,8 @@ will eventually be removed.  Compilation depends on a few things:
 * (optional) [c-ares] as alternative to Libevent's evdns
 * (optional) LDAP libraries
 * (optional) PAM libraries
+* (optional) [libcurl] and [jansson], required by `--with-oauth`, which the
+  OAuth validator modules are built against
 
 The Meson build additionally needs [Meson] 0.58+ and [Ninja]; the Autoconf
 build needs [GNU Make] 3.81+.
@@ -32,6 +34,8 @@ build needs [GNU Make] 3.81+.
 [pkg-config]: https://www.freedesktop.org/wiki/Software/pkg-config/
 [OpenSSL]: https://www.openssl.org/
 [c-ares]: http://c-ares.haxx.se/
+[libcurl]: https://curl.se/libcurl/
+[jansson]: https://github.com/akheron/jansson
 
 When dependencies are installed, build with Meson:
 
