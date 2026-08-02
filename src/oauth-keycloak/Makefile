@@ -9,6 +9,10 @@
 #   make check
 #   make install PREFIX=/usr/local
 #
+# The top-level Makefile drives these same targets when the tree was
+# configured --with-oauth, passing CC, CFLAGS, PKG_CONFIG and an install
+# directory of its own; keep them overridable from the command line.
+#
 
 CC ?= cc
 PKG_CONFIG ?= pkg-config
@@ -34,10 +38,10 @@ TEST_OBJECTS = kc_test.o kc_crypto.o kc_jwt.o kc_http.o
 all: $(MODULE)
 
 $(MODULE): $(OBJECTS)
-	$(CC) -shared $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
+	$(CC) -shared $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
 $(TEST): $(TEST_OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(TEST_OBJECTS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(TEST_OBJECTS) $(LDLIBS)
 
 check: $(TEST)
 	./$(TEST)
@@ -46,7 +50,10 @@ install: $(MODULE)
 	install -d $(DESTDIR)$(LIBDIR)
 	install -m 755 $(MODULE) $(DESTDIR)$(LIBDIR)/$(MODULE)
 
+uninstall:
+	rm -f $(DESTDIR)$(LIBDIR)/$(MODULE)
+
 clean:
 	rm -f $(MODULE) $(OBJECTS) $(TEST) kc_test.o
 
-.PHONY: all check install clean
+.PHONY: all check install uninstall clean
