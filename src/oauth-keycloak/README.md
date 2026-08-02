@@ -12,12 +12,23 @@ binary: PgBouncer `dlopen()`s it at startup when it is named in
 Needs libcurl, jansson and OpenSSL (1.1.1 or newer), with their development
 headers.
 
-A tree configured `--with-oauth` builds and installs the module along with
-`pgbouncer`, into `$(libdir)/pgbouncer`; from the top of the tree,
+A tree configured for OAuth builds and installs the module along with
+`pgbouncer`, into `$(libdir)/pgbouncer`.  With autoconf, from the top of the
+tree,
 
     make                # or: make keycloak
     make check          # or: make keycloak-check
     make install        # or: make keycloak-install
+
+and with meson, where it is an ordinary target of the build configured
+`-Doauth=enabled`,
+
+    meson compile -C build
+    meson test -C build kc_test
+    meson install -C build
+
+Meson leaves the module out, with a message, if OpenSSL was not found; OAuth
+itself does not need OpenSSL, this module does.
 
 The module can also be built on its own, which needs nothing from the main
 build but `include/oauth.h`:

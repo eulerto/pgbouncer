@@ -672,6 +672,24 @@ if windows
 endif
 
 # ----------------------------------------------------------------------
+# OAuth validator modules
+# ----------------------------------------------------------------------
+
+# The modules shipped with PgBouncer are built and installed along with it, so
+# that a build configured for OAuth also provides something to validate with.
+# They additionally need OpenSSL, which OAuth support itself does not: rather
+# than making -Doauth=enabled fail over a library the daemon does not need,
+# leave the module out and say so, since third-party validator modules can be
+# loaded either way.
+build_keycloak = oauth_support and openssl.found()
+if oauth_support and not openssl.found()
+  message('OpenSSL not found: the Keycloak validator module will not be built')
+endif
+if build_keycloak
+  subdir('src/oauth-keycloak')
+endif
+
+# ----------------------------------------------------------------------
 # Tools needed for docs and tests
 # ----------------------------------------------------------------------
 
@@ -767,6 +785,7 @@ summary({
   'adns': adns,
   'ldap': ldap.found(),
   'oauth': oauth_support,
+  'keycloak module': build_keycloak,
   'pam': pam.found(),
   'systemd': systemd.found(),
   'tls': openssl.found(),
