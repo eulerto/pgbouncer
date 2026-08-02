@@ -1,6 +1,12 @@
 
 include config.mak
 
+# Only used to build the validator modules below.  A config.mak generated
+# before this was substituted does not carry it, hence the fallback.
+ifeq ($(strip $(PKG_CONFIG)),)
+PKG_CONFIG = pkg-config
+endif
+
 bin_PROGRAMS = pgbouncer
 
 pgbouncer_SOURCES = \
@@ -148,6 +154,55 @@ include $(abs_top_srcdir)/lib/mk/antimake.mk
 config.mak:
 	@echo "Please run ./configure"
 	@exit 1
+
+#
+# Keycloak OAuth validator module
+#
+
+# src/oauth-keycloak builds a standalone shared object: pgbouncer dlopen()s it,
+# it is not linked into the binary, and antimake has no notion of shared
+# libraries, so the module keeps its own Makefile and these rules only drive
+# it.  They do nothing unless the tree was configured --with-oauth, since
+# without OAuth support pgbouncer cannot load the module anyway.
+#
+# The module is built in the source directory even for a build in a separate
+# directory: it needs no generated header, only include/oauth.h.
+
+# CFLAGS is passed on only when configure picked some up: passing an empty one
+# would override the module's own default instead of leaving it alone.
+keycloak_DIR = $(srcdir)/src/oauth-keycloak
+keycloak_MAKE = $(MAKE) -C $(keycloak_DIR) \
+	CC='$(CC)' $(if $(strip $(CFLAGS)),CFLAGS='$(CFLAGS)') \
+	CPPFLAGS='$(CPPFLAGS)' LDFLAGS='$(LDFLAGS)' PKG_CONFIG='$(PKG_CONFIG)' \
+	DESTDIR='$(DESTDIR)' LIBDIR='$(libdir)/pgbouncer'
+
+.PHONY: keycloak keycloak-check keycloak-install keycloak-uninstall keycloak-clean
+
+keycloak:
+	+$(keycloak_MAKE) all
+
+keycloak-check: keycloak
+	+$(keycloak_MAKE) check
+
+keycloak-install: keycloak
+	+$(keycloak_MAKE) install
+
+keycloak-uninstall:
+	+$(keycloak_MAKE) uninstall
+
+keycloak-clean:
+	+$(keycloak_MAKE) clean
+
+ifeq ($(oauth_support),yes)
+all-local: keycloak
+check: keycloak-check
+install-local: keycloak-install
+uninstall-local: keycloak-uninstall
+endif
+
+# Always cleaned: a tree configured without OAuth may still hold objects from
+# an earlier one that was.
+clean-local: keycloak-clean
 
 #
 # dist

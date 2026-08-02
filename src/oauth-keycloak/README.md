@@ -4,13 +4,23 @@ An OAuth validator module for PgBouncer that verifies OAUTHBEARER tokens
 issued by a Keycloak realm.
 
 The module is a standalone shared object.  It is not part of the `pgbouncer`
-binary and is not built by the main build: PgBouncer `dlopen()`s it at startup
-when it is named in `oauth_validator_libraries`.
+binary: PgBouncer `dlopen()`s it at startup when it is named in
+`oauth_validator_libraries`.
 
 ## Building
 
 Needs libcurl, jansson and OpenSSL (1.1.1 or newer), with their development
-headers:
+headers.
+
+A tree configured `--with-oauth` builds and installs the module along with
+`pgbouncer`, into `$(libdir)/pgbouncer`; from the top of the tree,
+
+    make                # or: make keycloak
+    make check          # or: make keycloak-check
+    make install        # or: make keycloak-install
+
+The module can also be built on its own, which needs nothing from the main
+build but `include/oauth.h`:
 
     make
     make check          # unit tests; needs no Keycloak
