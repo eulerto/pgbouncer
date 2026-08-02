@@ -41,6 +41,9 @@
 /* Longest client secret we will read out of a file. */
 #define KC_MAX_SECRET 4096
 
+/* The module ABI entry point is only ever reached through dlsym(). */
+const OAuthValidatorCallbacks *_pgbouncer_oauth_validator_module_init(void);
+
 struct kc_config {
 	bool introspect;
 
@@ -90,6 +93,12 @@ static void kc_log(ValidatorModuleState *state, int level, const char *fmt, ...)
 }
 
 /* printf into a freshly allocated string; asprintf is not portable enough. */
+static char *kc_sprintf(const char *fmt, ...)
+#ifdef __GNUC__
+__attribute__((format(printf, 1, 2)))
+#endif
+;
+
 static char *kc_sprintf(const char *fmt, ...)
 {
 	va_list ap;
