@@ -32,6 +32,7 @@
  * add their prefix here.
  */
 static const char *const custcfg_prefixes[] = {
+	"oauth",
 	NULL
 };
 
