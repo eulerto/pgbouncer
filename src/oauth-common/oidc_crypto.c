@@ -1,12 +1,12 @@
 /*
- * Keycloak OAuth validator module for PgBouncer.
+ * Shared OIDC core for PgBouncer's OAuth validator modules.  See oidc_crypto.h.
  *
- * See kc_crypto.h.  The OpenSSL 3 provider API and the pre-3.0 low-level API
+ * See oidc_crypto.h.  The OpenSSL 3 provider API and the pre-3.0 low-level API
  * are both supported, because a validator module tends to be built on
  * whatever the host distribution ships.
  */
 
-#include "kc_crypto.h"
+#include "oidc_crypto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +23,7 @@
 #include <openssl/param_build.h>
 #endif
 
-#define KC_SET_ERR(buf, len, ...) \
+#define OIDC_SET_ERR(buf, len, ...) \
 	do { \
 		if ((buf) && (len) > 0) \
 		snprintf((buf), (len), __VA_ARGS__); \
@@ -45,7 +45,7 @@ static int b64url_value(unsigned char c)
 	return -1;
 }
 
-unsigned char *kc_base64url_decode(const char *in, size_t inlen, size_t *outlen)
+unsigned char *oidc_base64url_decode(const char *in, size_t inlen, size_t *outlen)
 {
 	unsigned char *out;
 	size_t i, o = 0;
@@ -89,7 +89,7 @@ unsigned char *kc_base64url_decode(const char *in, size_t inlen, size_t *outlen)
 	return out;
 }
 
-char *kc_base64url_encode(const unsigned char *in, size_t len)
+char *oidc_base64url_encode(const unsigned char *in, size_t len)
 {
 	static const char alphabet[] =
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -125,29 +125,29 @@ char *kc_base64url_encode(const unsigned char *in, size_t len)
  * HMAC "HS*" algorithms, whose "key" would be the shared secret rather than
  * the provider public key) from ever reaching the verifier.
  */
-enum kc_sig_family {
-	KC_SIG_RSA_PKCS1,
-	KC_SIG_RSA_PSS,
-	KC_SIG_ECDSA
+enum oidc_sig_family {
+	OIDC_SIG_RSA_PKCS1,
+	OIDC_SIG_RSA_PSS,
+	OIDC_SIG_ECDSA
 };
 
-static bool alg_lookup(const char *alg, const EVP_MD **md, enum kc_sig_family *family)
+static bool alg_lookup(const char *alg, const EVP_MD **md, enum oidc_sig_family *family)
 {
 	static const struct {
 		const char *name;
 		const char *digest;
-		enum kc_sig_family family;
+		enum oidc_sig_family family;
 	} table[] = {
-		{ "RS256", "SHA256", KC_SIG_RSA_PKCS1 },
-		{ "RS384", "SHA384", KC_SIG_RSA_PKCS1 },
-		{ "RS512", "SHA512", KC_SIG_RSA_PKCS1 },
-		{ "PS256", "SHA256", KC_SIG_RSA_PSS },
-		{ "PS384", "SHA384", KC_SIG_RSA_PSS },
-		{ "PS512", "SHA512", KC_SIG_RSA_PSS },
-		{ "ES256", "SHA256", KC_SIG_ECDSA },
-		{ "ES384", "SHA384", KC_SIG_ECDSA },
-		{ "ES512", "SHA512", KC_SIG_ECDSA },
-		{ NULL, NULL, KC_SIG_RSA_PKCS1 }
+		{ "RS256", "SHA256", OIDC_SIG_RSA_PKCS1 },
+		{ "RS384", "SHA384", OIDC_SIG_RSA_PKCS1 },
+		{ "RS512", "SHA512", OIDC_SIG_RSA_PKCS1 },
+		{ "PS256", "SHA256", OIDC_SIG_RSA_PSS },
+		{ "PS384", "SHA384", OIDC_SIG_RSA_PSS },
+		{ "PS512", "SHA512", OIDC_SIG_RSA_PSS },
+		{ "ES256", "SHA256", OIDC_SIG_ECDSA },
+		{ "ES384", "SHA384", OIDC_SIG_ECDSA },
+		{ "ES512", "SHA512", OIDC_SIG_ECDSA },
+		{ NULL, NULL, OIDC_SIG_RSA_PKCS1 }
 	};
 
 	if (!alg)
@@ -165,7 +165,7 @@ static bool alg_lookup(const char *alg, const EVP_MD **md, enum kc_sig_family *f
 	return false;
 }
 
-bool kc_alg_supported(const char *alg)
+bool oidc_alg_supported(const char *alg)
 {
 	return alg_lookup(alg, NULL, NULL);
 }
@@ -178,19 +178,19 @@ static BIGNUM *jwk_bn(const char *b64, char *errbuf, size_t errlen, const char *
 	BIGNUM *bn;
 
 	if (!b64) {
-		KC_SET_ERR(errbuf, errlen, "JWK is missing \"%s\"", what);
+		OIDC_SET_ERR(errbuf, errlen, "JWK is missing \"%s\"", what);
 		return NULL;
 	}
 
-	raw = kc_base64url_decode(b64, strlen(b64), &rawlen);
+	raw = oidc_base64url_decode(b64, strlen(b64), &rawlen);
 	if (!raw) {
-		KC_SET_ERR(errbuf, errlen, "JWK member \"%s\" is not valid base64url", what);
+		OIDC_SET_ERR(errbuf, errlen, "JWK member \"%s\" is not valid base64url", what);
 		return NULL;
 	}
 	bn = BN_bin2bn(raw, (int)rawlen, NULL);
 	free(raw);
 	if (!bn)
-		KC_SET_ERR(errbuf, errlen, "JWK member \"%s\" is not a valid integer", what);
+		OIDC_SET_ERR(errbuf, errlen, "JWK member \"%s\" is not a valid integer", what);
 
 	return bn;
 }
@@ -278,7 +278,7 @@ static EVP_PKEY *rsa_pkey(const char *n_b64, const char *e_b64, char *errbuf, si
 #endif
 
 	if (!pkey)
-		KC_SET_ERR(errbuf, errlen, "cannot build RSA key from JWK");
+		OIDC_SET_ERR(errbuf, errlen, "cannot build RSA key from JWK");
 
 	return pkey;
 }
@@ -294,18 +294,18 @@ static EVP_PKEY *ec_pkey(const char *crv, const char *x_b64, const char *y_b64,
 	int nid = curve_nid(crv);
 
 	if (nid == NID_undef) {
-		KC_SET_ERR(errbuf, errlen, "unsupported JWK curve \"%s\"", crv ? crv : "");
+		OIDC_SET_ERR(errbuf, errlen, "unsupported JWK curve \"%s\"", crv ? crv : "");
 		return NULL;
 	}
 	if (!x_b64 || !y_b64) {
-		KC_SET_ERR(errbuf, errlen, "EC JWK is missing \"x\" or \"y\"");
+		OIDC_SET_ERR(errbuf, errlen, "EC JWK is missing \"x\" or \"y\"");
 		return NULL;
 	}
 
-	x = kc_base64url_decode(x_b64, strlen(x_b64), &xlen);
-	y = kc_base64url_decode(y_b64, strlen(y_b64), &ylen);
+	x = oidc_base64url_decode(x_b64, strlen(x_b64), &xlen);
+	y = oidc_base64url_decode(y_b64, strlen(y_b64), &ylen);
 	if (!x || !y) {
-		KC_SET_ERR(errbuf, errlen, "EC JWK coordinates are not valid base64url");
+		OIDC_SET_ERR(errbuf, errlen, "EC JWK coordinates are not valid base64url");
 		goto out;
 	}
 
@@ -315,7 +315,7 @@ static EVP_PKEY *ec_pkey(const char *crv, const char *x_b64, const char *y_b64,
 	 */
 	fieldlen = (nid == NID_X9_62_prime256v1) ? 32 : (nid == NID_secp384r1) ? 48 : 66;
 	if (xlen > fieldlen || ylen > fieldlen) {
-		KC_SET_ERR(errbuf, errlen, "EC JWK coordinates are too large for %s", crv);
+		OIDC_SET_ERR(errbuf, errlen, "EC JWK coordinates are too large for %s", crv);
 		goto out;
 	}
 
@@ -369,7 +369,7 @@ static EVP_PKEY *ec_pkey(const char *crv, const char *x_b64, const char *y_b64,
 #endif
 
 	if (!pkey)
-		KC_SET_ERR(errbuf, errlen, "cannot build EC key from JWK");
+		OIDC_SET_ERR(errbuf, errlen, "cannot build EC key from JWK");
 
 out:
 	free(point);
@@ -379,12 +379,12 @@ out:
 	return pkey;
 }
 
-EVP_PKEY *kc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
-			 const char *crv, const char *x_b64, const char *y_b64,
-			 char *errbuf, size_t errlen)
+EVP_PKEY *oidc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
+			   const char *crv, const char *x_b64, const char *y_b64,
+			   char *errbuf, size_t errlen)
 {
 	if (!kty) {
-		KC_SET_ERR(errbuf, errlen, "JWK is missing \"kty\"");
+		OIDC_SET_ERR(errbuf, errlen, "JWK is missing \"kty\"");
 		return NULL;
 	}
 	if (strcmp(kty, "RSA") == 0)
@@ -392,7 +392,7 @@ EVP_PKEY *kc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
 	if (strcmp(kty, "EC") == 0)
 		return ec_pkey(crv, x_b64, y_b64, errbuf, errlen);
 
-	KC_SET_ERR(errbuf, errlen, "unsupported JWK key type \"%s\"", kty);
+	OIDC_SET_ERR(errbuf, errlen, "unsupported JWK key type \"%s\"", kty);
 
 	return NULL;
 }
@@ -439,23 +439,23 @@ fail:
 	return NULL;
 }
 
-bool kc_jws_verify(EVP_PKEY *pkey, const char *alg,
-		   const char *signing_input, size_t signing_len,
-		   const unsigned char *sig, size_t siglen,
-		   char *errbuf, size_t errlen)
+bool oidc_jws_verify(EVP_PKEY *pkey, const char *alg,
+		     const char *signing_input, size_t signing_len,
+		     const unsigned char *sig, size_t siglen,
+		     char *errbuf, size_t errlen)
 {
 	EVP_MD_CTX *ctx = NULL;
 	EVP_PKEY_CTX *pctx = NULL;
 	const EVP_MD *md = NULL;
-	enum kc_sig_family family;
+	enum oidc_sig_family family;
 	unsigned char *der = NULL;
 	int derlen = 0;
 	bool ok = false;
 	int rc;
 
 	if (!alg_lookup(alg, &md, &family) || !md) {
-		KC_SET_ERR(errbuf, errlen, "unsupported signature algorithm \"%s\"",
-			   alg ? alg : "(none)");
+		OIDC_SET_ERR(errbuf, errlen, "unsupported signature algorithm \"%s\"",
+			     alg ? alg : "(none)");
 		return false;
 	}
 
@@ -464,41 +464,41 @@ bool kc_jws_verify(EVP_PKEY *pkey, const char *alg,
 	 * ES256 must not be verified against an RSA key just because that is
 	 * what the JWKS happened to hand back for the kid.
 	 */
-	if (family == KC_SIG_ECDSA) {
+	if (family == OIDC_SIG_ECDSA) {
 		if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
-			KC_SET_ERR(errbuf, errlen, "algorithm \"%s\" does not match the key type", alg);
+			OIDC_SET_ERR(errbuf, errlen, "algorithm \"%s\" does not match the key type", alg);
 			return false;
 		}
 	} else if (EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA &&
 		   EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA_PSS) {
-		KC_SET_ERR(errbuf, errlen, "algorithm \"%s\" does not match the key type", alg);
+		OIDC_SET_ERR(errbuf, errlen, "algorithm \"%s\" does not match the key type", alg);
 		return false;
 	}
 
 	ctx = EVP_MD_CTX_new();
 	if (!ctx) {
-		KC_SET_ERR(errbuf, errlen, "out of memory");
+		OIDC_SET_ERR(errbuf, errlen, "out of memory");
 		return false;
 	}
 
 	if (EVP_DigestVerifyInit(ctx, &pctx, md, NULL, pkey) <= 0) {
-		KC_SET_ERR(errbuf, errlen, "cannot initialize signature verification");
+		OIDC_SET_ERR(errbuf, errlen, "cannot initialize signature verification");
 		goto out;
 	}
 
-	if (family == KC_SIG_RSA_PSS) {
+	if (family == OIDC_SIG_RSA_PSS) {
 		if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) <= 0 ||
 		    EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) <= 0 ||
 		    EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, md) <= 0) {
-			KC_SET_ERR(errbuf, errlen, "cannot configure PSS verification");
+			OIDC_SET_ERR(errbuf, errlen, "cannot configure PSS verification");
 			goto out;
 		}
 	}
 
-	if (family == KC_SIG_ECDSA) {
+	if (family == OIDC_SIG_ECDSA) {
 		der = ecdsa_raw_to_der(sig, siglen, &derlen);
 		if (!der) {
-			KC_SET_ERR(errbuf, errlen, "malformed ECDSA signature");
+			OIDC_SET_ERR(errbuf, errlen, "malformed ECDSA signature");
 			goto out;
 		}
 		rc = EVP_DigestVerify(ctx, der, (size_t)derlen,
@@ -511,7 +511,7 @@ bool kc_jws_verify(EVP_PKEY *pkey, const char *alg,
 	if (rc == 1) {
 		ok = true;
 	} else {
-		KC_SET_ERR(errbuf, errlen, "signature does not verify");
+		OIDC_SET_ERR(errbuf, errlen, "signature does not verify");
 	}
 
 out:

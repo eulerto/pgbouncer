@@ -1,8 +1,8 @@
 /*
- * Keycloak OAuth validator module for PgBouncer.  See kc_jwt.h.
+ * Shared OIDC core for PgBouncer's OAuth validator modules.  See oidc_jwt.h.
  */
 
-#include "kc_jwt.h"
+#include "oidc_jwt.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -11,9 +11,9 @@
 #include <strings.h>
 #include <time.h>
 
-#include "kc_crypto.h"
+#include "oidc_crypto.h"
 
-#define KC_SET_ERR(buf, len, ...) \
+#define OIDC_SET_ERR(buf, len, ...) \
 	do { \
 		if ((buf) && (len) > 0) \
 		snprintf((buf), (len), __VA_ARGS__); \
@@ -22,22 +22,22 @@
 /*
  * A signing key from the provider JWKS.
  */
-struct kc_jwks_key {
+struct oidc_jwks_key {
 	char *kid;
 	EVP_PKEY *pkey;
 };
 
-struct kc_jwks_cache {
+struct oidc_jwks_cache {
 	char *url;
 	int min_refresh;
-	struct kc_tls_opts tls;
+	struct oidc_tls_opts tls;
 
 	/*
 	 * Guards everything below; held across a refetch so that a burst of logins
 	 * produces one request rather than one per worker.
 	 * */
 	pthread_mutex_t mutex;
-	struct kc_jwks_key *keys;
+	struct oidc_jwks_key *keys;
 	int nkeys;
 	time_t last_fetch;
 };
@@ -102,8 +102,8 @@ static bool scope_present(const char *scope_claim, const char *wanted)
 	return false;
 }
 
-bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
-		     char **authn_id, char *errbuf, size_t errlen)
+bool oidc_claims_check(json_t *claims, const struct oidc_claims_policy *policy,
+		       char **authn_id, char *errbuf, size_t errlen)
 {
 	const char *identity;
 	json_t *exp, *nbf;
@@ -112,7 +112,7 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
 	*authn_id = NULL;
 
 	if (!json_is_object(claims)) {
-		KC_SET_ERR(errbuf, errlen, "claims are not a JSON object");
+		OIDC_SET_ERR(errbuf, errlen, "claims are not a JSON object");
 		return false;
 	}
 
@@ -122,17 +122,17 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
 	 */
 	exp = json_object_get(claims, "exp");
 	if (!json_is_integer(exp)) {
-		KC_SET_ERR(errbuf, errlen, "token has no \"exp\" claim");
+		OIDC_SET_ERR(errbuf, errlen, "token has no \"exp\" claim");
 		return false;
 	}
 	if (now > (time_t)json_integer_value(exp) + policy->clock_skew) {
-		KC_SET_ERR(errbuf, errlen, "token expired");
+		OIDC_SET_ERR(errbuf, errlen, "token expired");
 		return false;
 	}
 
 	nbf = json_object_get(claims, "nbf");
 	if (json_is_integer(nbf) && now + policy->clock_skew < (time_t)json_integer_value(nbf)) {
-		KC_SET_ERR(errbuf, errlen, "token is not valid yet");
+		OIDC_SET_ERR(errbuf, errlen, "token is not valid yet");
 		return false;
 	}
 
@@ -140,15 +140,15 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
 		const char *iss = claim_string(claims, "iss");
 
 		if (!iss || strcmp(iss, policy->issuer) != 0) {
-			KC_SET_ERR(errbuf, errlen, "token issuer \"%s\" is not the configured issuer",
-				   iss ? iss : "(none)");
+			OIDC_SET_ERR(errbuf, errlen, "token issuer \"%s\" is not the configured issuer",
+				     iss ? iss : "(none)");
 			return false;
 		}
 	}
 
 	if (policy->naudiences > 0 &&
 	    !audience_matches(claims, policy->audiences, policy->naudiences)) {
-		KC_SET_ERR(errbuf, errlen, "token audience does not include the configured audience");
+		OIDC_SET_ERR(errbuf, errlen, "token audience does not include the configured audience");
 		return false;
 	}
 
@@ -157,8 +157,8 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
 
 		for (int i = 0; i < policy->nscopes; i++) {
 			if (!scope || !scope_present(scope, policy->scopes[i])) {
-				KC_SET_ERR(errbuf, errlen, "token is missing required scope \"%s\"",
-					   policy->scopes[i]);
+				OIDC_SET_ERR(errbuf, errlen, "token is missing required scope \"%s\"",
+					     policy->scopes[i]);
 				return false;
 			}
 		}
@@ -166,14 +166,14 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
 
 	identity = claim_string(claims, policy->authn_claim);
 	if (!identity || !*identity) {
-		KC_SET_ERR(errbuf, errlen, "token has no \"%s\" claim to take the identity from",
-			   policy->authn_claim);
+		OIDC_SET_ERR(errbuf, errlen, "token has no \"%s\" claim to take the identity from",
+			     policy->authn_claim);
 		return false;
 	}
 
 	*authn_id = strdup(identity);
 	if (!*authn_id) {
-		KC_SET_ERR(errbuf, errlen, "out of memory");
+		OIDC_SET_ERR(errbuf, errlen, "out of memory");
 		return false;
 	}
 
@@ -184,10 +184,10 @@ bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
  * JWKS cache.
  */
 
-struct kc_jwks_cache *kc_jwks_new(const char *url, int min_refresh,
-				  const struct kc_tls_opts *tls)
+struct oidc_jwks_cache *oidc_jwks_new(const char *url, int min_refresh,
+				      const struct oidc_tls_opts *tls)
 {
-	struct kc_jwks_cache *cache = calloc(1, sizeof(*cache));
+	struct oidc_jwks_cache *cache = calloc(1, sizeof(*cache));
 
 	if (!cache)
 		return NULL;
@@ -208,7 +208,7 @@ struct kc_jwks_cache *kc_jwks_new(const char *url, int min_refresh,
 	return cache;
 }
 
-static void free_keys(struct kc_jwks_cache *cache)
+static void free_keys(struct oidc_jwks_cache *cache)
 {
 	for (int i = 0; i < cache->nkeys; i++) {
 		free(cache->keys[i].kid);
@@ -220,7 +220,7 @@ static void free_keys(struct kc_jwks_cache *cache)
 	cache->nkeys = 0;
 }
 
-void kc_jwks_free(struct kc_jwks_cache *cache)
+void oidc_jwks_free(struct oidc_jwks_cache *cache)
 {
 	if (!cache)
 		return;
@@ -232,12 +232,12 @@ void kc_jwks_free(struct kc_jwks_cache *cache)
 }
 
 /* Parse a JWKS document into the cache.  Called with the mutex held. */
-static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
+static bool load_jwks(struct oidc_jwks_cache *cache, const char *body,
 		      char *errbuf, size_t errlen)
 {
 	json_error_t jerr;
 	json_t *doc, *keys;
-	struct kc_jwks_key *parsed;
+	struct oidc_jwks_key *parsed;
 	size_t idx;
 	json_t *jwk;
 	int n = 0;
@@ -245,13 +245,13 @@ static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
 
 	doc = json_loads(body, 0, &jerr);
 	if (!doc) {
-		KC_SET_ERR(errbuf, errlen, "JWKS is not valid JSON: %s", jerr.text);
+		OIDC_SET_ERR(errbuf, errlen, "JWKS is not valid JSON: %s", jerr.text);
 		return false;
 	}
 
 	keys = json_object_get(doc, "keys");
 	if (!json_is_array(keys)) {
-		KC_SET_ERR(errbuf, errlen, "JWKS has no \"keys\" array");
+		OIDC_SET_ERR(errbuf, errlen, "JWKS has no \"keys\" array");
 		json_decref(doc);
 		return false;
 	}
@@ -259,7 +259,7 @@ static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
 	count = json_array_size(keys);
 	parsed = calloc(count ? count : 1, sizeof(*parsed));
 	if (!parsed) {
-		KC_SET_ERR(errbuf, errlen, "out of memory");
+		OIDC_SET_ERR(errbuf, errlen, "out of memory");
 		json_decref(doc);
 		return false;
 	}
@@ -274,14 +274,14 @@ static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
 		if (use && strcmp(use, "sig") != 0)
 			continue;
 		/* Skip key types and algorithms we would never accept anyway. */
-		if (alg && !kc_alg_supported(alg))
+		if (alg && !oidc_alg_supported(alg))
 			continue;
 
-		pkey = kc_jwk_to_pkey(claim_string(jwk, "kty"),
-				      claim_string(jwk, "n"), claim_string(jwk, "e"),
-				      claim_string(jwk, "crv"),
-				      claim_string(jwk, "x"), claim_string(jwk, "y"),
-				      NULL, 0);
+		pkey = oidc_jwk_to_pkey(claim_string(jwk, "kty"),
+					claim_string(jwk, "n"), claim_string(jwk, "e"),
+					claim_string(jwk, "crv"),
+					claim_string(jwk, "x"), claim_string(jwk, "y"),
+					NULL, 0);
 		if (!pkey)
 			continue;
 
@@ -293,7 +293,7 @@ static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
 	json_decref(doc);
 
 	if (n == 0) {
-		KC_SET_ERR(errbuf, errlen, "JWKS contains no usable signing key");
+		OIDC_SET_ERR(errbuf, errlen, "JWKS contains no usable signing key");
 		free(parsed);
 		return false;
 	}
@@ -307,19 +307,19 @@ static bool load_jwks(struct kc_jwks_cache *cache, const char *body,
 }
 
 /* Fetch and install the JWKS.  Called with the mutex held. */
-static bool refresh_jwks(struct kc_jwks_cache *cache, int timeout_ms,
+static bool refresh_jwks(struct oidc_jwks_cache *cache, int timeout_ms,
 			 char *errbuf, size_t errlen)
 {
-	struct kc_http_response resp;
+	struct oidc_http_response resp;
 	bool ok;
 
-	if (!kc_http_get(cache->url, &cache->tls, timeout_ms, &resp, errbuf, errlen))
+	if (!oidc_http_get(cache->url, &cache->tls, timeout_ms, &resp, errbuf, errlen))
 		return false;
 
 	if (resp.status != 200) {
-		KC_SET_ERR(errbuf, errlen, "JWKS endpoint %s returned HTTP %ld",
-			   cache->url, resp.status);
-		kc_http_response_free(&resp);
+		OIDC_SET_ERR(errbuf, errlen, "JWKS endpoint %s returned HTTP %ld",
+			     cache->url, resp.status);
+		oidc_http_response_free(&resp);
 		/* Remember the attempt so a failing endpoint is not hammered. */
 		cache->last_fetch = time(NULL);
 		return false;
@@ -328,13 +328,13 @@ static bool refresh_jwks(struct kc_jwks_cache *cache, int timeout_ms,
 	ok = load_jwks(cache, resp.body ? resp.body : "", errbuf, errlen);
 	if (!ok)
 		cache->last_fetch = time(NULL);
-	kc_http_response_free(&resp);
+	oidc_http_response_free(&resp);
 
 	return ok;
 }
 
 /* Find a key by id, or the only key when the token names none.  Mutex held. */
-static EVP_PKEY *lookup_key(struct kc_jwks_cache *cache, const char *kid)
+static EVP_PKEY *lookup_key(struct oidc_jwks_cache *cache, const char *kid)
 {
 	if (!kid) {
 		if (cache->nkeys == 1)
@@ -354,7 +354,7 @@ static EVP_PKEY *lookup_key(struct kc_jwks_cache *cache, const char *kid)
  * Return the signing key for kid, fetching or refreshing the JWKS if needed.
  * The caller owns a reference and frees it with EVP_PKEY_free().
  */
-static EVP_PKEY *get_key(struct kc_jwks_cache *cache, const char *kid, int timeout_ms,
+static EVP_PKEY *get_key(struct oidc_jwks_cache *cache, const char *kid, int timeout_ms,
 			 bool *internal, char *errbuf, size_t errlen)
 {
 	EVP_PKEY *pkey;
@@ -376,8 +376,8 @@ static EVP_PKEY *get_key(struct kc_jwks_cache *cache, const char *kid, int timeo
 			else
 				*internal = true;	/* the provider, not the token */
 		} else {
-			KC_SET_ERR(errbuf, errlen,
-				   "no signing key \"%s\" in the cached JWKS", kid ? kid : "(none)");
+			OIDC_SET_ERR(errbuf, errlen,
+				     "no signing key \"%s\" in the cached JWKS", kid ? kid : "(none)");
 		}
 	}
 
@@ -387,7 +387,7 @@ static EVP_PKEY *get_key(struct kc_jwks_cache *cache, const char *kid, int timeo
 	pthread_mutex_unlock(&cache->mutex);
 
 	if (!pkey && errbuf && !errbuf[0])
-		KC_SET_ERR(errbuf, errlen, "no signing key for key id \"%s\"", kid ? kid : "(none)");
+		OIDC_SET_ERR(errbuf, errlen, "no signing key for key id \"%s\"", kid ? kid : "(none)");
 
 	return pkey;
 }
@@ -405,20 +405,20 @@ static json_t *decode_json_segment(const char *seg, size_t seglen, const char *w
 	json_error_t jerr;
 	json_t *obj;
 
-	raw = kc_base64url_decode(seg, seglen, &rawlen);
+	raw = oidc_base64url_decode(seg, seglen, &rawlen);
 	if (!raw) {
-		KC_SET_ERR(errbuf, errlen, "token %s is not valid base64url", what);
+		OIDC_SET_ERR(errbuf, errlen, "token %s is not valid base64url", what);
 		return NULL;
 	}
 
 	obj = json_loadb((const char *)raw, rawlen, 0, &jerr);
 	free(raw);
 	if (!obj) {
-		KC_SET_ERR(errbuf, errlen, "token %s is not valid JSON: %s", what, jerr.text);
+		OIDC_SET_ERR(errbuf, errlen, "token %s is not valid JSON: %s", what, jerr.text);
 		return NULL;
 	}
 	if (!json_is_object(obj)) {
-		KC_SET_ERR(errbuf, errlen, "token %s is not a JSON object", what);
+		OIDC_SET_ERR(errbuf, errlen, "token %s is not a JSON object", what);
 		json_decref(obj);
 		return NULL;
 	}
@@ -426,9 +426,9 @@ static json_t *decode_json_segment(const char *seg, size_t seglen, const char *w
 	return obj;
 }
 
-bool kc_jwt_verify(const char *token, struct kc_jwks_cache *jwks,
-		   const struct kc_claims_policy *policy, int timeout_ms,
-		   char **authn_id, bool *internal, char *errbuf, size_t errlen)
+bool oidc_jwt_verify(const char *token, struct oidc_jwks_cache *jwks,
+		     const struct oidc_claims_policy *policy, int timeout_ms,
+		     char **authn_id, bool *internal, char *errbuf, size_t errlen)
 {
 	const char *dot1, *dot2;
 	json_t *header = NULL, *claims = NULL;
@@ -446,12 +446,12 @@ bool kc_jwt_verify(const char *token, struct kc_jwks_cache *jwks,
 	/* Compact serialization: header.payload.signature */
 	dot1 = strchr(token, '.');
 	if (!dot1) {
-		KC_SET_ERR(errbuf, errlen, "token is not a JWT");
+		OIDC_SET_ERR(errbuf, errlen, "token is not a JWT");
 		return false;
 	}
 	dot2 = strchr(dot1 + 1, '.');
 	if (!dot2 || strchr(dot2 + 1, '.')) {
-		KC_SET_ERR(errbuf, errlen, "token is not a JWT");
+		OIDC_SET_ERR(errbuf, errlen, "token is not a JWT");
 		return false;
 	}
 
@@ -468,14 +468,14 @@ bool kc_jwt_verify(const char *token, struct kc_jwks_cache *jwks,
 	typ = claim_string(header, "typ");
 	if (typ && strcasecmp(typ, "JWT") != 0 && strcasecmp(typ, "at+jwt") != 0 &&
 	    strcasecmp(typ, "application/at+jwt") != 0) {
-		KC_SET_ERR(errbuf, errlen, "unexpected token type \"%s\"", typ);
+		OIDC_SET_ERR(errbuf, errlen, "unexpected token type \"%s\"", typ);
 		goto out;
 	}
 
 	alg = claim_string(header, "alg");
-	if (!kc_alg_supported(alg)) {
-		KC_SET_ERR(errbuf, errlen, "unsupported token algorithm \"%s\"",
-			   alg ? alg : "(none)");
+	if (!oidc_alg_supported(alg)) {
+		OIDC_SET_ERR(errbuf, errlen, "unsupported token algorithm \"%s\"",
+			     alg ? alg : "(none)");
 		goto out;
 	}
 	kid = claim_string(header, "kid");
@@ -484,20 +484,20 @@ bool kc_jwt_verify(const char *token, struct kc_jwks_cache *jwks,
 	if (!pkey)
 		goto out;
 
-	sig = kc_base64url_decode(dot2 + 1, strlen(dot2 + 1), &siglen);
+	sig = oidc_base64url_decode(dot2 + 1, strlen(dot2 + 1), &siglen);
 	if (!sig || siglen == 0) {
-		KC_SET_ERR(errbuf, errlen, "token signature is not valid base64url");
+		OIDC_SET_ERR(errbuf, errlen, "token signature is not valid base64url");
 		goto out;
 	}
 
-	if (!kc_jws_verify(pkey, alg, token, (size_t)(dot2 - token), sig, siglen, errbuf, errlen))
+	if (!oidc_jws_verify(pkey, alg, token, (size_t)(dot2 - token), sig, siglen, errbuf, errlen))
 		goto out;
 
 	claims = decode_json_segment(dot1 + 1, dot2 - dot1 - 1, "payload", errbuf, errlen);
 	if (!claims)
 		goto out;
 
-	ok = kc_claims_check(claims, policy, authn_id, errbuf, errlen);
+	ok = oidc_claims_check(claims, policy, authn_id, errbuf, errlen);
 
 out:
 	free(sig);

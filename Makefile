@@ -156,53 +156,72 @@ config.mak:
 	@exit 1
 
 #
-# Keycloak OAuth validator module
+# OAuth validator modules
 #
 
-# src/oauth-keycloak builds a standalone shared object: pgbouncer dlopen()s it,
-# it is not linked into the binary, and antimake has no notion of shared
-# libraries, so the module keeps its own Makefile and these rules only drive
-# it.  They do nothing unless the tree was configured --with-oauth, since
-# without OAuth support pgbouncer cannot load the module anyway.
+# Each module under src/oauth-* builds a standalone shared object: pgbouncer
+# dlopen()s it, it is not linked into the binary, and antimake has no notion of
+# shared libraries, so a module keeps its own Makefile and these rules only
+# drive it.  They do nothing unless the tree was configured --with-oauth, since
+# without OAuth support pgbouncer cannot load a module anyway.
 #
-# The module is built in the source directory even for a build in a separate
-# directory: it needs no generated header, only include/oauth.h.
+# src/oauth-common is not a module: it holds the OIDC core the modules compile
+# into themselves, and its unit tests.
+#
+# Modules are built in the source directory even for a build in a separate
+# directory: they need no generated header, only include/oauth.h.
 
 # CFLAGS is passed on only when configure picked some up: passing an empty one
-# would override the module's own default instead of leaving it alone.
-keycloak_DIR = $(srcdir)/src/oauth-keycloak
-keycloak_MAKE = $(MAKE) -C $(keycloak_DIR) \
+# would override a module's own default instead of leaving it alone.
+oauth_module_MAKE = $(MAKE) \
 	CC='$(CC)' $(if $(strip $(CFLAGS)),CFLAGS='$(CFLAGS)') \
 	CPPFLAGS='$(CPPFLAGS)' LDFLAGS='$(LDFLAGS)' PKG_CONFIG='$(PKG_CONFIG)' \
 	DESTDIR='$(DESTDIR)' LIBDIR='$(libdir)/pgbouncer'
 
-.PHONY: keycloak keycloak-check keycloak-install keycloak-uninstall keycloak-clean
+# One set of rules per module: <name>, <name>-check, and so on, all forwarding
+# to src/oauth-<name>/Makefile.  $(1) is the module name, so `make keycloak`
+# builds src/oauth-keycloak.
+define oauth_module_rules
+.PHONY: $(1) $(1)-check $(1)-install $(1)-uninstall $(1)-clean
 
-keycloak:
-	+$(keycloak_MAKE) all
+$(1):
+	+$$(oauth_module_MAKE) -C $$(srcdir)/src/oauth-$(1) all
 
-keycloak-check: keycloak
-	+$(keycloak_MAKE) check
+$(1)-check: $(1)
+	+$$(oauth_module_MAKE) -C $$(srcdir)/src/oauth-$(1) check
 
-keycloak-install: keycloak
-	+$(keycloak_MAKE) install
+$(1)-install: $(1)
+	+$$(oauth_module_MAKE) -C $$(srcdir)/src/oauth-$(1) install
 
-keycloak-uninstall:
-	+$(keycloak_MAKE) uninstall
+$(1)-uninstall:
+	+$$(oauth_module_MAKE) -C $$(srcdir)/src/oauth-$(1) uninstall
 
-keycloak-clean:
-	+$(keycloak_MAKE) clean
+$(1)-clean:
+	+$$(oauth_module_MAKE) -C $$(srcdir)/src/oauth-$(1) clean
+endef
+
+# The core is not installed, so it has no install/uninstall of its own.
+.PHONY: oauth-common-check oauth-common-clean
+
+oauth-common-check:
+	+$(oauth_module_MAKE) -C $(srcdir)/src/oauth-common check
+
+oauth-common-clean:
+	+$(oauth_module_MAKE) -C $(srcdir)/src/oauth-common clean
+
+oauth_modules = keycloak
+$(foreach mod,$(oauth_modules),$(eval $(call oauth_module_rules,$(mod))))
 
 ifeq ($(oauth_support),yes)
-all-local: keycloak
-check: keycloak-check
-install-local: keycloak-install
-uninstall-local: keycloak-uninstall
+all-local: $(oauth_modules)
+check: oauth-common-check $(addsuffix -check,$(oauth_modules))
+install-local: $(addsuffix -install,$(oauth_modules))
+uninstall-local: $(addsuffix -uninstall,$(oauth_modules))
 endif
 
 # Always cleaned: a tree configured without OAuth may still hold objects from
 # an earlier one that was.
-clean-local: keycloak-clean
+clean-local: oauth-common-clean $(addsuffix -clean,$(oauth_modules))
 
 #
 # dist

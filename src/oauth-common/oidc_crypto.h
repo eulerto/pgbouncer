@@ -1,5 +1,5 @@
 /*
- * Keycloak OAuth validator module for PgBouncer.
+ * Shared OIDC core for PgBouncer's OAuth validator modules.
  *
  * Cryptographic primitives for JWS verification: base64url decoding, turning
  * a JWK components into an OpenSSL public key, and verifying a signature
@@ -10,8 +10,8 @@
  * be right about crypto free of the code that must be right about parsing.
  */
 
-#ifndef KC_CRYPTO_H
-#define KC_CRYPTO_H
+#ifndef OIDC_CRYPTO_H
+#define OIDC_CRYPTO_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,16 +24,16 @@
  * result is NUL-terminated as a convenience for decoding JSON segments; the
  * terminator is not counted in *outlen.
  */
-unsigned char *kc_base64url_decode(const char *in, size_t inlen, size_t *outlen);
+unsigned char *oidc_base64url_decode(const char *in, size_t inlen, size_t *outlen);
 
 /* Encode len bytes as base64url without padding; returns a malloc()'d string. */
-char *kc_base64url_encode(const unsigned char *in, size_t len);
+char *oidc_base64url_encode(const unsigned char *in, size_t len);
 
 /*
  * True if alg names a signature algorithm this module accepts.  Notably
  * false for "none": an unsigned token must never be treated as verified.
  */
-bool kc_alg_supported(const char *alg);
+bool oidc_alg_supported(const char *alg);
 
 /*
  * Build a public key from the JWK members.  For kty="RSA" pass n and e; for
@@ -41,9 +41,9 @@ bool kc_alg_supported(const char *alg);
  * base64url as they appear in the JWK.  Returns NULL and fills errbuf on
  * failure.  The caller owns the key and frees it with EVP_PKEY_free().
  */
-EVP_PKEY *kc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
-			 const char *crv, const char *x_b64, const char *y_b64,
-			 char *errbuf, size_t errlen);
+EVP_PKEY *oidc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
+			   const char *crv, const char *x_b64, const char *y_b64,
+			   char *errbuf, size_t errlen);
 
 /*
  * Verify a JWS signature.  signing_input is the "<header>.<payload>" part of
@@ -51,9 +51,9 @@ EVP_PKEY *kc_jwk_to_pkey(const char *kty, const char *n_b64, const char *e_b64,
  * the decoded third segment.  Returns false both for a bad signature and for
  * an internal error; errbuf tells them apart for logging.
  */
-bool kc_jws_verify(EVP_PKEY *pkey, const char *alg,
-		   const char *signing_input, size_t signing_len,
-		   const unsigned char *sig, size_t siglen,
-		   char *errbuf, size_t errlen);
+bool oidc_jws_verify(EVP_PKEY *pkey, const char *alg,
+		     const char *signing_input, size_t signing_len,
+		     const unsigned char *sig, size_t siglen,
+		     char *errbuf, size_t errlen);
 
 #endif

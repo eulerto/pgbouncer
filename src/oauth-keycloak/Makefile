@@ -20,8 +20,14 @@ PKG_CONFIG ?= pkg-config
 PREFIX ?= /usr/local
 LIBDIR ?= $(PREFIX)/lib/pgbouncer
 
+# The shared OIDC core is compiled into the module rather than linked from
+# somewhere else, so that the installed module is a single self-contained .so.
+COMMON = ../oauth-common
+
 MODULE = keycloak.so
-SOURCES = keycloak.c kc_crypto.c kc_http.c kc_jwt.c
+SOURCES = keycloak.c \
+	$(COMMON)/oidc_crypto.c $(COMMON)/oidc_http.c \
+	$(COMMON)/oidc_jwt.c $(COMMON)/oidc_util.c
 OBJECTS = $(SOURCES:.c=.o)
 
 DEPS_CFLAGS := $(shell $(PKG_CONFIG) --cflags libcurl jansson openssl)
@@ -29,22 +35,19 @@ DEPS_LIBS := $(shell $(PKG_CONFIG) --libs libcurl jansson openssl)
 
 CFLAGS ?= -O2 -g
 override CFLAGS += -Wall -Wextra -Wno-unused-parameter -fPIC -pthread
-override CPPFLAGS += -I../../include $(DEPS_CFLAGS)
+override CPPFLAGS += -I$(COMMON) -I../../include $(DEPS_CFLAGS)
 override LDLIBS += $(DEPS_LIBS) -pthread
-
-TEST = kc_test
-TEST_OBJECTS = kc_test.o kc_crypto.o kc_jwt.o kc_http.o
 
 all: $(MODULE)
 
 $(MODULE): $(OBJECTS)
 	$(CC) -shared $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
-$(TEST): $(TEST_OBJECTS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(TEST_OBJECTS) $(LDLIBS)
-
-check: $(TEST)
-	./$(TEST)
+# This module has no unit tests of its own: what it adds to the shared core is
+# configuration handling, which the pytest suite covers end to end (see
+# test/test_oauth.py).  The core's tests live with the core.
+check:
+	@echo "no unit tests here; run 'make check' in $(COMMON)"
 
 install: $(MODULE)
 	install -d $(DESTDIR)$(LIBDIR)
@@ -54,6 +57,6 @@ uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(MODULE)
 
 clean:
-	rm -f $(MODULE) $(OBJECTS) $(TEST) kc_test.o
+	rm -f $(MODULE) $(OBJECTS)
 
 .PHONY: all check install uninstall clean

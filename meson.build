@@ -681,11 +681,14 @@ endif
 # than making -Doauth=enabled fail over a library the daemon does not need,
 # leave the module out and say so, since third-party validator modules can be
 # loaded either way.
-build_keycloak = oauth_support and openssl.found()
+build_oauth_modules = oauth_support and openssl.found()
 if oauth_support and not openssl.found()
-  message('OpenSSL not found: the Keycloak validator module will not be built')
+  message('OpenSSL not found: the bundled validator modules will not be built')
 endif
-if build_keycloak
+if build_oauth_modules
+  # The shared OIDC core first: it publishes the sources and flags the modules
+  # below are built from.
+  subdir('src/oauth-common')
   subdir('src/oauth-keycloak')
 endif
 
@@ -785,7 +788,7 @@ summary({
   'adns': adns,
   'ldap': ldap.found(),
   'oauth': oauth_support,
-  'keycloak module': build_keycloak,
+  'validator modules': build_oauth_modules,
   'pam': pam.found(),
   'systemd': systemd.found(),
   'tls': openssl.found(),

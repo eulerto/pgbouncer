@@ -12,6 +12,11 @@ binary: PgBouncer `dlopen()`s it at startup when it is named in
 Needs libcurl, jansson and OpenSSL (1.1.1 or newer), with their development
 headers.
 
+The OIDC machinery the module is built on — JWT verification, the JWKS cache,
+the HTTP client and the crypto — is shared with the other validator modules
+and lives in `../oauth-common`.  It is compiled into this module rather than
+linked from elsewhere, so the installed `keycloak.so` is self-contained.
+
 A tree configured for OAuth builds and installs the module along with
 `pgbouncer`, into `$(libdir)/pgbouncer`.  With autoconf, from the top of the
 tree,
@@ -24,7 +29,7 @@ and with meson, where it is an ordinary target of the build configured
 `-Doauth=enabled`,
 
     meson compile -C build
-    meson test -C build kc_test
+    meson test -C build oidc_test
     meson install -C build
 
 Meson leaves the module out, with a message, if OpenSSL was not found; OAuth
@@ -34,7 +39,6 @@ The module can also be built on its own, which needs nothing from the main
 build but `include/oauth.h`:
 
     make
-    make check          # unit tests; needs no Keycloak
     make install PREFIX=/usr/local
 
 ## Configuring PgBouncer
@@ -107,12 +111,16 @@ In `introspect` mode Keycloak must additionally report it as `active`.
 
 ## Tests
 
-`make check` runs `kc_test`, which mints its own keys, serves a JWKS from a
-throwaway HTTP server on localhost, and signs its own tokens.  It covers
-base64url, JWK-to-key conversion, RSA and ECDSA verification, the claim
-policy, and the JWKS cache, including that a bad signature is reported as a
-rejected token while an unreachable provider is reported as an internal error
-— PgBouncer logs the two very differently.
+The module's own tests are the end-to-end ones in `test/test_oauth.py`, which
+cover it being loaded, named and configured from `[oauth:keycloak]`.
 
-It does not cover talking to a real Keycloak; point the module at a test realm
+What it is built on is covered by `oidc_test` in `../oauth-common`, run with
+`make check` there: it mints its own keys, serves a JWKS from a throwaway HTTP
+server on localhost, and signs its own tokens, covering base64url,
+JWK-to-key conversion, RSA and ECDSA verification, the claim policy, and the
+JWKS cache — including that a bad signature is reported as a rejected token
+while an unreachable provider is reported as an internal error, which
+PgBouncer logs very differently.
+
+Neither covers talking to a real Keycloak; point the module at a test realm
 for that.

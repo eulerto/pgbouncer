@@ -1,5 +1,5 @@
 /*
- * Keycloak OAuth validator module for PgBouncer.
+ * Shared OIDC core for PgBouncer's OAuth validator modules.
  *
  * Minimal HTTPS client over libcurl.  Every call is synchronous and bounded
  * by the deadline PgBouncer hands to validate_cb: the module runs on a worker
@@ -7,31 +7,31 @@
  * block every login queued behind it.
  */
 
-#ifndef KC_HTTP_H
-#define KC_HTTP_H
+#ifndef OIDC_HTTP_H
+#define OIDC_HTTP_H
 
 #include <stdbool.h>
 #include <stddef.h>
 
 /* Refuse a response larger than this; a JWKS or introspection reply is tiny. */
-#define KC_HTTP_MAX_BODY (1024 * 1024)
+#define OIDC_HTTP_MAX_BODY (1024 * 1024)
 
-struct kc_tls_opts {
+struct oidc_tls_opts {
 	/* CA bundle to verify the provider with, or NULL for the system store. */
 	const char *ca_file;
 	/* Verifying the provider certificate; off only for testing. */
 	bool verify_peer;
 };
 
-struct kc_http_response {
-	char *body;		/* NUL-terminated; free with kc_http_response_free */
+struct oidc_http_response {
+	char *body;		/* NUL-terminated; free with oidc_http_response_free */
 	size_t len;
 	long status;
 };
 
 /* Process-wide libcurl setup; call once from the module startup callback. */
-bool kc_http_init(char *errbuf, size_t errlen);
-void kc_http_fini(void);
+bool oidc_http_init(char *errbuf, size_t errlen);
+void oidc_http_fini(void);
 
 /*
  * Perform a GET (or a form POST when body is non-NULL, optionally with HTTP
@@ -39,16 +39,16 @@ void kc_http_fini(void);
  * transport error, with the reason in errbuf; an HTTP error status is a
  * successful call with resp->status set.
  */
-bool kc_http_get(const char *url, const struct kc_tls_opts *tls, int timeout_ms,
-		 struct kc_http_response *resp, char *errbuf, size_t errlen);
-bool kc_http_post_form(const char *url, const char *body,
-		       const char *user, const char *password,
-		       const struct kc_tls_opts *tls, int timeout_ms,
-		       struct kc_http_response *resp, char *errbuf, size_t errlen);
+bool oidc_http_get(const char *url, const struct oidc_tls_opts *tls, int timeout_ms,
+		   struct oidc_http_response *resp, char *errbuf, size_t errlen);
+bool oidc_http_post_form(const char *url, const char *body,
+			 const char *user, const char *password,
+			 const struct oidc_tls_opts *tls, int timeout_ms,
+			 struct oidc_http_response *resp, char *errbuf, size_t errlen);
 
-void kc_http_response_free(struct kc_http_response *resp);
+void oidc_http_response_free(struct oidc_http_response *resp);
 
 /* URL-encode a value for a form body; returns a malloc()'d string. */
-char *kc_http_escape(const char *value);
+char *oidc_http_escape(const char *value);
 
 #endif
