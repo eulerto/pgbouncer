@@ -16,6 +16,16 @@
 
 #include "oidc_http.h"
 
+/*
+ * One claim that must be present with exactly this value.  Providers use
+ * these to say things their issuer URL does not, such as which tenant a token
+ * belongs to or which version of the token format it is.
+ */
+struct oidc_claim_req {
+	const char *name;
+	const char *value;
+};
+
 /* What a token has to prove before its bearer is let in. */
 struct oidc_claims_policy {
 	/* Required "iss", or NULL to accept any issuer (not recommended). */
@@ -25,12 +35,35 @@ struct oidc_claims_policy {
 	char **audiences;
 	int naudiences;
 
-	/* Every one of these must appear in the "scope" claim. */
+	/*
+	 * Every one of these must appear in the scope claim, which is a
+	 * space-separated string.  Which claim that is differs by provider:
+	 * "scope" when scope_claim is NULL, "scp" for Microsoft Entra ID.
+	 */
 	char **scopes;
 	int nscopes;
+	const char *scope_claim;
 
-	/* Claim the authenticated identity is taken from. */
-	const char *authn_claim;
+	/*
+	 * Every one of these must appear in the role claim, an array of
+	 * strings.  Only checked when role_claim is set.
+	 */
+	char **roles;
+	int nroles;
+	const char *role_claim;
+
+	/* Claims that must be present with a given value; see above. */
+	const struct oidc_claim_req *required;
+	int nrequired;
+
+	/*
+	 * Claims the authenticated identity is taken from, in order: the first
+	 * one the token carries wins.  A provider issues different claims to
+	 * different kinds of principal (a user has a username, a service
+	 * principal only an object id), so a single name is not always enough.
+	 */
+	char **authn_claims;
+	int nauthn_claims;
 
 	/* Tolerance in seconds applied to "exp" and "nbf". */
 	int clock_skew;
