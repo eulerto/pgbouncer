@@ -689,6 +689,7 @@ if build_oauth_modules
   # The shared OIDC core first: it publishes the sources and flags the modules
   # below are built from.
   subdir('src/oauth-common')
+  subdir('src/oauth-entra')
   subdir('src/oauth-keycloak')
 endif
 

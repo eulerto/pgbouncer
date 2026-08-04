@@ -6,9 +6,12 @@ library, named in `oauth_validator_libraries`, that decides whether the token
 is good and whose identity it proves.  PgBouncer never interprets tokens
 itself, so everything provider-specific lives in the module.
 
-A worked example ships in `src/oauth-keycloak`; `test/oauth_validator.c` is a
-minimal dependency-free one to start from.  The interface is declared in
-`include/oauth.h`, which is the only PgBouncer header a module needs.
+Two worked examples ship with PgBouncer, `src/oauth-keycloak` and
+`src/oauth-entra`; what they have in common is factored out into
+`src/oauth-common`, which is a reasonable starting point for a module for
+another provider.  `test/oauth_validator.c` is a minimal dependency-free one.
+The interface is declared in `include/oauth.h`, which is the only PgBouncer
+header a module needs.
 
 ## Contract
 

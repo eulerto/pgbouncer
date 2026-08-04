@@ -256,7 +256,8 @@ fail:
  * connection (oauth_scope, or the HBA line scope=), so that what clients
  * are told to ask for is also what they are held to.
  */
-static void build_policy(const struct kc_config *cfg, const char *scope,
+/* Not const: the policy points at the config's own claim name. */
+static void build_policy(struct kc_config *cfg, const char *scope,
 			 char ***scratch, int *nscratch,
 			 struct oidc_claims_policy *policy)
 {
@@ -264,7 +265,9 @@ static void build_policy(const struct kc_config *cfg, const char *scope,
 	policy->issuer = cfg->issuer;
 	policy->audiences = cfg->audiences;
 	policy->naudiences = cfg->naudiences;
-	policy->authn_claim = cfg->authn_claim;
+	/* One claim, but the core takes a list. */
+	policy->authn_claims = &cfg->authn_claim;
+	policy->nauthn_claims = 1;
 	policy->clock_skew = cfg->clock_skew;
 
 	*scratch = NULL;

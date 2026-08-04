@@ -209,7 +209,7 @@ oauth-common-check:
 oauth-common-clean:
 	+$(oauth_module_MAKE) -C $(srcdir)/src/oauth-common clean
 
-oauth_modules = keycloak
+oauth_modules = entra keycloak
 $(foreach mod,$(oauth_modules),$(eval $(call oauth_module_rules,$(mod))))
 
 ifeq ($(oauth_support),yes)

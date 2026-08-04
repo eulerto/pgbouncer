@@ -78,7 +78,28 @@ static bool audience_matches(json_t *claims, char **wanted, int nwanted)
 	return false;
 }
 
-/* The "scope" claim is a space-separated list. */
+/* True if a string-array claim contains wanted. */
+static bool array_claim_contains(json_t *claims, const char *name, const char *wanted)
+{
+	json_t *arr = json_object_get(claims, name);
+	size_t idx;
+	json_t *entry;
+
+	if (json_is_string(arr))
+		return strcmp(json_string_value(arr), wanted) == 0;
+
+	if (!json_is_array(arr))
+		return false;
+
+	json_array_foreach(arr, idx, entry) {
+		if (json_is_string(entry) && strcmp(json_string_value(entry), wanted) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/* The scope claim is a space-separated list. */
 static bool scope_present(const char *scope_claim, const char *wanted)
 {
 	size_t wantedlen = strlen(wanted);
@@ -152,8 +173,20 @@ bool oidc_claims_check(json_t *claims, const struct oidc_claims_policy *policy,
 		return false;
 	}
 
+	for (int i = 0; i < policy->nrequired; i++) {
+		const char *name = policy->required[i].name;
+		const char *have = claim_string(claims, name);
+
+		if (!have || strcmp(have, policy->required[i].value) != 0) {
+			OIDC_SET_ERR(errbuf, errlen, "token \"%s\" is \"%s\", not the expected \"%s\"",
+				     name, have ? have : "(none)", policy->required[i].value);
+			return false;
+		}
+	}
+
 	if (policy->nscopes > 0) {
-		const char *scope = claim_string(claims, "scope");
+		const char *name = policy->scope_claim ? policy->scope_claim : "scope";
+		const char *scope = claim_string(claims, name);
 
 		for (int i = 0; i < policy->nscopes; i++) {
 			if (!scope || !scope_present(scope, policy->scopes[i])) {
@@ -164,10 +197,31 @@ bool oidc_claims_check(json_t *claims, const struct oidc_claims_policy *policy,
 		}
 	}
 
-	identity = claim_string(claims, policy->authn_claim);
-	if (!identity || !*identity) {
-		OIDC_SET_ERR(errbuf, errlen, "token has no \"%s\" claim to take the identity from",
-			     policy->authn_claim);
+	if (policy->nroles > 0 && policy->role_claim) {
+		for (int i = 0; i < policy->nroles; i++) {
+			if (!array_claim_contains(claims, policy->role_claim, policy->roles[i])) {
+				OIDC_SET_ERR(errbuf, errlen, "token is missing required role \"%s\"",
+					     policy->roles[i]);
+				return false;
+			}
+		}
+	}
+
+	/*
+	 * The identity comes from the first of the configured claims the token
+	 * actually carries, so that one policy can cover principals the provider
+	 * describes differently.
+	 */
+	identity = NULL;
+	for (int i = 0; i < policy->nauthn_claims && !identity; i++) {
+		const char *val = claim_string(claims, policy->authn_claims[i]);
+
+		if (val && *val)
+			identity = val;
+	}
+	if (!identity) {
+		OIDC_SET_ERR(errbuf, errlen, "token carries none of the %d claim(s) the identity is taken from",
+			     policy->nauthn_claims);
 		return false;
 	}
 

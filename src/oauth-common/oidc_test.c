@@ -208,13 +208,15 @@ static void test_claims_policy(void)
 {
 	char *audiences[] = { "pgbouncer" };
 	char *scopes[] = { "openid", "email" };
+	char *authn_claims[] = { "preferred_username" };
 	struct oidc_claims_policy policy;
 	long now = (long)time(NULL);
 	char *json;
 
 	memset(&policy, 0, sizeof(policy));
 	policy.issuer = TEST_ISSUER;
-	policy.authn_claim = "preferred_username";
+	policy.authn_claims = authn_claims;
+	policy.nauthn_claims = 1;
 	policy.clock_skew = 60;
 	policy.audiences = audiences;
 	policy.naudiences = 1;
@@ -275,6 +277,7 @@ static void test_claims_policy(void)
 
 static void test_jwt_end_to_end(void)
 {
+	char *authn_claims[] = { "preferred_username" };
 	EVP_PKEY *key = oidc_test_generate_key("RSA", 2048);
 	EVP_PKEY *other = oidc_test_generate_key("RSA", 2048);
 	char *jwks_doc = oidc_test_rsa_jwks(key, "kid-1");
@@ -300,7 +303,8 @@ static void test_jwt_end_to_end(void)
 
 	memset(&policy, 0, sizeof(policy));
 	policy.issuer = TEST_ISSUER;
-	policy.authn_claim = "preferred_username";
+	policy.authn_claims = authn_claims;
+	policy.nauthn_claims = 1;
 	policy.clock_skew = 60;
 
 	claims = claims_json(now + 300, TEST_ISSUER, "pgbouncer", "openid", "alice");
@@ -394,6 +398,7 @@ static void test_jwt_end_to_end(void)
 
 static void test_jwks_unreachable(void)
 {
+	char *authn_claims[] = { "preferred_username" };
 	struct oidc_jwks_cache *cache;
 	struct oidc_claims_policy policy;
 	char errbuf[256];
@@ -403,7 +408,8 @@ static void test_jwks_unreachable(void)
 	CHECK(oidc_http_init(errbuf, sizeof(errbuf)));
 
 	memset(&policy, 0, sizeof(policy));
-	policy.authn_claim = "preferred_username";
+	policy.authn_claims = authn_claims;
+	policy.nauthn_claims = 1;
 
 	/* Port 1 on loopback: nothing is listening. */
 	cache = oidc_jwks_new("http://127.0.0.1:1/certs", 300, &(struct oidc_tls_opts) { NULL, true });

@@ -582,29 +582,33 @@ async def test_oauth_validator_required_when_ambiguous(oauth_two_validators):
 
 
 # -------------------------------------------------------------------
-# The Keycloak validator module (src/oauth-keycloak).
+# The bundled validator modules (src/oauth-*).
 # -------------------------------------------------------------------
 
-KEYCLOAK_DIR = TEST_DIR / ".." / "src" / "oauth-keycloak"
-OIDC_DIR = TEST_DIR / ".." / "src" / "oauth-common"
+SRC_DIR = TEST_DIR / ".." / "src"
+OIDC_DIR = SRC_DIR / "oauth-common"
 OIDC_SOURCES = ("oidc_crypto.c", "oidc_http.c", "oidc_jwt.c", "oidc_util.c")
 
 
-def build_keycloak_validator(tmp_path):
-    """Build the Keycloak module, or skip if its dependencies are missing."""
+def build_validator_module(tmp_path, name):
+    """Build a bundled module, or skip if its dependencies are missing.
+
+    Built here rather than taken from the build directory so the tests run the
+    same way under both build systems.
+    """
     for pkg in ("libcurl", "jansson", "openssl"):
         if subprocess.run(["pkg-config", "--exists", pkg], check=False).returncode != 0:
             pytest.skip(f"{pkg} development files are not installed")
 
-    so_path = tmp_path / "keycloak.so"
+    so_path = tmp_path / f"{name}.so"
     cflags = subprocess.run(
         ["pkg-config", "--cflags", "--libs", "libcurl", "jansson", "openssl"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.split()
-    sources = [str(KEYCLOAK_DIR / "keycloak.c")] + [
-        str(OIDC_DIR / name) for name in OIDC_SOURCES
+    sources = [str(SRC_DIR / f"oauth-{name}" / f"{name}.c")] + [
+        str(OIDC_DIR / src) for src in OIDC_SOURCES
     ]
     subprocess.run(
         [
@@ -622,6 +626,14 @@ def build_keycloak_validator(tmp_path):
         check=True,
     )
     return so_path
+
+
+def build_keycloak_validator(tmp_path):
+    return build_validator_module(tmp_path, "keycloak")
+
+
+def build_entra_validator(tmp_path):
+    return build_validator_module(tmp_path, "entra")
 
 
 @pytest.fixture
@@ -698,3 +710,110 @@ async def test_keycloak_rejects_garbage_token(keycloak_bouncer):
     assert result["ok"] is False
     assert "OAuth authentication failed" in result["error"]
     assert "token is not a JWT" in keycloak_bouncer.log_path.read_text()
+
+
+# -------------------------------------------------------------------
+# The Microsoft Entra ID validator module (src/oauth-entra).
+# -------------------------------------------------------------------
+
+ENTRA_TENANT = "00000000-1111-2222-3333-444444444444"
+ENTRA_CLIENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+ENTRA_ISSUER = f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0"
+
+
+@pytest.fixture
+async def entra_bouncer(bouncer, pg, tmp_path):
+    """PgBouncer with the Entra ID module loaded and configured.
+
+    No Entra ID tenant is involved: the tests here cover the seam between
+    PgBouncer and the module (loading, naming, its [oauth:entra] section),
+    while the module's own token handling is tested by
+    src/oauth-entra/entra_test.c.
+    """
+    validator = build_entra_validator(tmp_path)
+
+    pg.sql("drop role if exists oauthuser")
+    pg.sql("create user oauthuser")
+    with bouncer.auth_path.open("a") as f:
+        f.write('"oauthuser" "unused"\n')
+
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini(f"oauth_issuer = {ENTRA_ISSUER}")
+    bouncer.write_ini("[oauth:entra]")
+    bouncer.write_ini(f"tenant = {ENTRA_TENANT}")
+    bouncer.write_ini(f"client_id = {ENTRA_CLIENT_ID}")
+    await bouncer.restart()
+
+    yield bouncer
+
+
+async def test_entra_module_loads(entra_bouncer):
+    log = entra_bouncer.log_path.read_text()
+    # The module declares the name "entra" and finds its own section.
+    assert 'loaded OAuth validator module "entra"' in log
+    assert "(2 option(s))" in log
+    assert f"entra: configured for issuer {ENTRA_ISSUER}" in log
+    assert "v2 tokens" in log
+
+
+async def test_entra_rejects_unknown_setting(entra_bouncer):
+    await entra_bouncer.stop()
+    entra_bouncer.write_ini("nosuchsetting = 1")
+
+    output = await run_pgbouncer_expecting_failure(entra_bouncer)
+    assert 'unrecognized setting "nosuchsetting" in [oauth:entra]' in output
+    assert "failed to start" in output
+
+
+async def test_entra_requires_tenant(bouncer, pg, tmp_path):
+    validator = build_entra_validator(tmp_path)
+
+    await bouncer.stop()
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini("[oauth:entra]")
+    bouncer.write_ini(f"client_id = {ENTRA_CLIENT_ID}")
+
+    output = await run_pgbouncer_expecting_failure(bouncer)
+    assert '"tenant" is required in [oauth:entra]' in output
+
+
+async def test_entra_refuses_multitenant(bouncer, pg, tmp_path):
+    # tenant=common would accept tokens from every other tenant as well.
+    validator = build_entra_validator(tmp_path)
+
+    await bouncer.stop()
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini("[oauth:entra]")
+    bouncer.write_ini("tenant = common")
+    bouncer.write_ini(f"client_id = {ENTRA_CLIENT_ID}")
+
+    output = await run_pgbouncer_expecting_failure(bouncer)
+    assert "must name one tenant" in output
+
+
+async def test_entra_requires_audience(bouncer, pg, tmp_path):
+    # Without client_id or audience any token from the tenant would be taken.
+    validator = build_entra_validator(tmp_path)
+
+    await bouncer.stop()
+    bouncer.write_ini("auth_type = oauth")
+    bouncer.write_ini(f"oauth_validator_libraries = {validator}")
+    bouncer.write_ini("[oauth:entra]")
+    bouncer.write_ini(f"tenant = {ENTRA_TENANT}")
+
+    output = await run_pgbouncer_expecting_failure(bouncer)
+    assert '"client_id" or "audience" is required in [oauth:entra]' in output
+
+
+async def test_entra_rejects_garbage_token(entra_bouncer):
+    # Entra ID is not reachable from the test suite, but a token that is not
+    # even a JWT is turned down before the module tries to fetch any key.
+    result = oauth_exchange(
+        entra_bouncer, "oauthuser", "p0a", oauth_initial_response("not-a-jwt")
+    )
+    assert result["ok"] is False
+    assert "OAuth authentication failed" in result["error"]
+    assert "token is not a JWT" in entra_bouncer.log_path.read_text()

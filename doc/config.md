@@ -584,8 +584,10 @@ several are listed here.
 
     oauth_validator_libraries = /usr/lib/pgbouncer/keycloak.so, /usr/lib/pgbouncer/entra.so
 
-A validator module for Keycloak ships in `src/oauth-keycloak`; it is built
-separately from PgBouncer itself.
+Two validator modules ship with PgBouncer, for Keycloak (`src/oauth-keycloak`)
+and for Microsoft Entra ID (`src/oauth-entra`); each has a README with its own
+settings.  They are built along with PgBouncer when it is configured for OAuth,
+but installed as separate shared objects rather than linked into the binary.
 
 Default: not set
 

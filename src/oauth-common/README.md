@@ -2,7 +2,7 @@
 
 The parts of OpenID Connect token validation that are the same whoever issued
 the token, factored out of the modules that ship with PgBouncer
-(`../oauth-keycloak` and friends).
+(`../oauth-keycloak` and `../oauth-entra`).
 
 This is not a module and not a library: there is nothing here for
 `oauth_validator_libraries` to name, and nothing is installed.  Each module
@@ -31,5 +31,5 @@ own tokens.  Under meson it is the `oidc_test` target.
 A module supplies what is provider-specific — where the keys live, which
 claims mean what, and how the settings are spelled — and calls
 `oidc_jwt_verify()` with a `struct oidc_claims_policy` it filled in.
-`../oauth-keycloak/keycloak.c` is the worked example; the ABI a module
-implements is documented in `include/oauth.h`.
+`../oauth-keycloak/keycloak.c` and `../oauth-entra/entra.c` are the two worked
+examples; the ABI a module implements is documented in `include/oauth.h`.
