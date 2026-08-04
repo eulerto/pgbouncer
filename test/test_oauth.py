@@ -586,6 +586,8 @@ async def test_oauth_validator_required_when_ambiguous(oauth_two_validators):
 # -------------------------------------------------------------------
 
 KEYCLOAK_DIR = TEST_DIR / ".." / "src" / "oauth-keycloak"
+OIDC_DIR = TEST_DIR / ".." / "src" / "oauth-common"
+OIDC_SOURCES = ("oidc_crypto.c", "oidc_http.c", "oidc_jwt.c", "oidc_util.c")
 
 
 def build_keycloak_validator(tmp_path):
@@ -601,9 +603,8 @@ def build_keycloak_validator(tmp_path):
         text=True,
         check=True,
     ).stdout.split()
-    sources = [
-        str(KEYCLOAK_DIR / name)
-        for name in ("keycloak.c", "kc_crypto.c", "kc_http.c", "kc_jwt.c")
+    sources = [str(KEYCLOAK_DIR / "keycloak.c")] + [
+        str(OIDC_DIR / name) for name in OIDC_SOURCES
     ]
     subprocess.run(
         [
@@ -612,6 +613,7 @@ def build_keycloak_validator(tmp_path):
             "-fPIC",
             "-pthread",
             f"-I{TEST_DIR / '..' / 'include'}",
+            f"-I{OIDC_DIR}",
             "-o",
             str(so_path),
             *sources,
@@ -628,7 +630,7 @@ async def keycloak_bouncer(bouncer, pg, tmp_path):
 
     No Keycloak is involved: the tests here cover the seam between PgBouncer
     and the module (loading, naming, its [oauth:keycloak] section), while the
-    module's own token handling is tested by src/oauth-keycloak/kc_test.c.
+    shared token handling is tested by src/oauth-common/oidc_test.c.
     """
     validator = build_keycloak_validator(tmp_path)
 

@@ -23,23 +23,15 @@
  * See README.md in this directory for the full list of settings.
  */
 
-#include <ctype.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "oauth.h"
 
-#include "kc_crypto.h"
-#include "kc_http.h"
-#include "kc_jwt.h"
-
-#define KC_ERRLEN 512
-
-/* Longest client secret we will read out of a file. */
-#define KC_MAX_SECRET 4096
+#include "oidc_http.h"
+#include "oidc_jwt.h"
+#include "oidc_util.h"
 
 /* The module ABI entry point is only ever reached through dlsym(). */
 const OAuthValidatorCallbacks *_pgbouncer_oauth_validator_module_init(void);
@@ -65,205 +57,20 @@ struct kc_config {
 	int clock_skew;
 	int jwks_min_refresh;
 
-	struct kc_tls_opts tls;
-	struct kc_jwks_cache *jwks;
+	struct oidc_tls_opts tls;
+	struct oidc_jwks_cache *jwks;
 };
 
 /*
- * Log through PgBouncer, which tags the line with this module name and puts
- * it wherever the pooler own log goes.  Writing to stderr instead would
- * lose the message entirely once PgBouncer daemonizes.
+ * Configuration.
  */
-static void kc_log(ValidatorModuleState *state, int level, const char *fmt, ...)
-#ifdef __GNUC__
-__attribute__((format(printf, 3, 4)))
-#endif
-;
-
-static void kc_log(ValidatorModuleState *state, int level, const char *fmt, ...)
-{
-	char buf[1024];
-	va_list ap;
-
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-
-	state->log_cb(state, level, "%s", buf);
-}
-
-/* printf into a freshly allocated string; asprintf is not portable enough. */
-static char *kc_sprintf(const char *fmt, ...)
-#ifdef __GNUC__
-__attribute__((format(printf, 1, 2)))
-#endif
-;
-
-static char *kc_sprintf(const char *fmt, ...)
-{
-	va_list ap;
-	char *out;
-	int len;
-
-	va_start(ap, fmt);
-	len = vsnprintf(NULL, 0, fmt, ap);
-	va_end(ap);
-	if (len < 0)
-		return NULL;
-
-	out = malloc((size_t)len + 1);
-	if (!out)
-		return NULL;
-
-	va_start(ap, fmt);
-	vsnprintf(out, (size_t)len + 1, fmt, ap);
-	va_end(ap);
-
-	return out;
-}
-
-/*
- * Configuration helpers.
- */
-
-/* Split a comma- or space-separated list into a malloc()'d array. */
-static bool split_list(const char *value, char ***out, int *nout)
-{
-	char *copy = strdup(value);
-	char **items = NULL;
-	int n = 0;
-	char *p;
-
-	if (!copy)
-		return false;
-
-	for (p = copy; *p; ) {
-		char *start;
-		char **grown;
-
-		while (*p == ' ' || *p == '\t' || *p == ',')
-			p++;
-		if (!*p)
-			break;
-		start = p;
-		while (*p && *p != ' ' && *p != '\t' && *p != ',')
-			p++;
-		if (*p)
-			*p++ = '\0';
-
-		grown = realloc(items, (n + 1) * sizeof(*items));
-		if (!grown)
-			goto fail;
-		items = grown;
-		items[n] = strdup(start);
-		if (!items[n])
-			goto fail;
-		n++;
-	}
-
-	free(copy);
-	*out = items;
-	*nout = n;
-
-	return true;
-
-fail:
-	while (n > 0)
-		free(items[--n]);
-	free(items);
-	free(copy);
-
-	return false;
-}
-
-static void free_list(char **items, int n)
-{
-	while (n > 0)
-		free(items[--n]);
-	free(items);
-}
-
-static bool parse_bool(const char *value, bool *out)
-{
-	if (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 ||
-	    strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0) {
-		*out = true;
-		return true;
-	}
-	if (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 ||
-	    strcasecmp(value, "no") == 0 || strcasecmp(value, "off") == 0) {
-		*out = false;
-		return true;
-	}
-
-	return false;
-}
-
-static bool parse_int(const char *value, int *out)
-{
-	char *end;
-	long v;
-
-	v = strtol(value, &end, 10);
-	if (end == value || *end != '\0' || v < 0 || v > 86400 * 30)
-		return false;
-	*out = (int)v;
-
-	return true;
-}
-
-/* Join an issuer with a well-known Keycloak endpoint path. */
-static char *issuer_url(const char *issuer, const char *suffix)
-{
-	size_t len = strlen(issuer);
-	bool slash = len > 0 && issuer[len - 1] == '/';
-
-	return kc_sprintf("%s%s", issuer, slash ? suffix + 1 : suffix);
-}
-
-/*
- * Read a client secret from a file.  Keeping the secret out of pgbouncer.ini
- * is the recommended arrangement: the ini file is read by every reload and
- * tends to be world-readable, while this file can be mode 0600.
- */
-static char *read_secret_file(ValidatorModuleState *state, const char *path)
-{
-	char buf[KC_MAX_SECRET];
-	size_t len;
-	FILE *f = fopen(path, "r");
-
-	if (!f) {
-		kc_log(state, OAUTH_LOG_ERROR, "cannot open client_secret_file \"%s\"", path);
-		return NULL;
-	}
-
-	len = fread(buf, 1, sizeof(buf) - 1, f);
-	if (ferror(f)) {
-		kc_log(state, OAUTH_LOG_ERROR, "cannot read client_secret_file \"%s\"", path);
-		fclose(f);
-		return NULL;
-	}
-	fclose(f);
-	buf[len] = '\0';
-
-	/* A secret in a file is normally followed by a newline. */
-	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-		buf[--len] = '\0';
-
-	if (len == 0) {
-		kc_log(state, OAUTH_LOG_ERROR, "client_secret_file \"%s\" is empty", path);
-		return NULL;
-	}
-
-	return strdup(buf);
-}
 
 static void config_free(struct kc_config *cfg)
 {
 	if (!cfg)
 		return;
 
-	kc_jwks_free(cfg->jwks);
+	oidc_jwks_free(cfg->jwks);
 	free(cfg->issuer);
 	free(cfg->jwks_url);
 	free(cfg->introspection_url);
@@ -275,8 +82,8 @@ static void config_free(struct kc_config *cfg)
 	}
 	free(cfg->authn_claim);
 	free(cfg->ca_file);
-	free_list(cfg->audiences, cfg->naudiences);
-	free_list(cfg->scopes, cfg->nscopes);
+	oidc_free_list(cfg->audiences, cfg->naudiences);
+	oidc_free_list(cfg->scopes, cfg->nscopes);
 	free(cfg);
 }
 
@@ -293,7 +100,7 @@ static struct kc_config *config_load(ValidatorModuleState *state)
 	bool ok = true;
 
 	if (!cfg) {
-		kc_log(state, OAUTH_LOG_ERROR, "out of memory");
+		oidc_log(state, OAUTH_LOG_ERROR, "out of memory");
 		return NULL;
 	}
 
@@ -330,32 +137,32 @@ static struct kc_config *config_load(ValidatorModuleState *state)
 		} else if (strcmp(key, "ca_file") == 0) {
 			cfg->ca_file = strdup(val);
 		} else if (strcmp(key, "audience") == 0) {
-			if (!split_list(val, &cfg->audiences, &cfg->naudiences)) {
-				kc_log(state, OAUTH_LOG_ERROR, "cannot parse audience");
+			if (!oidc_split_list(val, &cfg->audiences, &cfg->naudiences)) {
+				oidc_log(state, OAUTH_LOG_ERROR, "cannot parse audience");
 				ok = false;
 			}
 		} else if (strcmp(key, "require_scope") == 0) {
-			if (!split_list(val, &cfg->scopes, &cfg->nscopes)) {
-				kc_log(state, OAUTH_LOG_ERROR, "cannot parse require_scope");
+			if (!oidc_split_list(val, &cfg->scopes, &cfg->nscopes)) {
+				oidc_log(state, OAUTH_LOG_ERROR, "cannot parse require_scope");
 				ok = false;
 			}
 		} else if (strcmp(key, "clock_skew") == 0) {
-			if (!parse_int(val, &cfg->clock_skew)) {
-				kc_log(state, OAUTH_LOG_ERROR, "clock_skew must be a number of seconds");
+			if (!oidc_parse_int(val, &cfg->clock_skew)) {
+				oidc_log(state, OAUTH_LOG_ERROR, "clock_skew must be a number of seconds");
 				ok = false;
 			}
 		} else if (strcmp(key, "jwks_min_refresh") == 0) {
-			if (!parse_int(val, &cfg->jwks_min_refresh)) {
-				kc_log(state, OAUTH_LOG_ERROR, "jwks_min_refresh must be a number of seconds");
+			if (!oidc_parse_int(val, &cfg->jwks_min_refresh)) {
+				oidc_log(state, OAUTH_LOG_ERROR, "jwks_min_refresh must be a number of seconds");
 				ok = false;
 			}
 		} else if (strcmp(key, "tls_verify") == 0) {
-			if (!parse_bool(val, &cfg->tls.verify_peer)) {
-				kc_log(state, OAUTH_LOG_ERROR, "tls_verify must be a boolean");
+			if (!oidc_parse_bool(val, &cfg->tls.verify_peer)) {
+				oidc_log(state, OAUTH_LOG_ERROR, "tls_verify must be a boolean");
 				ok = false;
 			}
 		} else {
-			kc_log(state, OAUTH_LOG_ERROR, "unrecognized setting \"%s\" in [oauth:%s]", key, state->name);
+			oidc_log(state, OAUTH_LOG_ERROR, "unrecognized setting \"%s\" in [oauth:%s]", key, state->name);
 			ok = false;
 		}
 	}
@@ -367,27 +174,27 @@ static struct kc_config *config_load(ValidatorModuleState *state)
 		if (strcmp(mode, "introspect") == 0) {
 			cfg->introspect = true;
 		} else if (strcmp(mode, "jwks") != 0) {
-			kc_log(state, OAUTH_LOG_ERROR, "mode must be \"jwks\" or \"introspect\", not \"%s\"", mode);
+			oidc_log(state, OAUTH_LOG_ERROR, "mode must be \"jwks\" or \"introspect\", not \"%s\"", mode);
 			goto fail;
 		}
 	}
 
 	if (!cfg->issuer || !*cfg->issuer) {
-		kc_log(state, OAUTH_LOG_ERROR, "\"issuer\" is required in [oauth:%s]", state->name);
+		oidc_log(state, OAUTH_LOG_ERROR, "\"issuer\" is required in [oauth:%s]", state->name);
 		goto fail;
 	}
 	if (strncmp(cfg->issuer, "https://", 8) != 0 &&
 	    strncmp(cfg->issuer, "http://", 7) != 0) {
-		kc_log(state, OAUTH_LOG_ERROR, "\"issuer\" must be an http(s) URL");
+		oidc_log(state, OAUTH_LOG_ERROR, "\"issuer\" must be an http(s) URL");
 		goto fail;
 	}
 
 	if (secret_file) {
 		if (cfg->client_secret) {
-			kc_log(state, OAUTH_LOG_ERROR, "client_secret and client_secret_file are mutually exclusive");
+			oidc_log(state, OAUTH_LOG_ERROR, "client_secret and client_secret_file are mutually exclusive");
 			goto fail;
 		}
-		cfg->client_secret = read_secret_file(state, secret_file);
+		cfg->client_secret = oidc_read_secret_file(state, secret_file);
 		if (!cfg->client_secret)
 			goto fail;
 	}
@@ -401,32 +208,32 @@ static struct kc_config *config_load(ValidatorModuleState *state)
 	if (cfg->introspect) {
 		if (!cfg->introspection_url) {
 			cfg->introspection_url =
-				issuer_url(cfg->issuer, "/protocol/openid-connect/token/introspect");
+				oidc_url_join(cfg->issuer, "/protocol/openid-connect/token/introspect");
 			if (!cfg->introspection_url)
 				goto fail;
 		}
 		if (!cfg->client_id || !cfg->client_secret) {
-			kc_log(state, OAUTH_LOG_ERROR, "mode=introspect requires client_id and "
-			       "client_secret (or client_secret_file)");
+			oidc_log(state, OAUTH_LOG_ERROR, "mode=introspect requires client_id and "
+				 "client_secret (or client_secret_file)");
 			goto fail;
 		}
 	} else {
 		if (!cfg->jwks_url) {
-			cfg->jwks_url = issuer_url(cfg->issuer, "/protocol/openid-connect/certs");
+			cfg->jwks_url = oidc_url_join(cfg->issuer, "/protocol/openid-connect/certs");
 			if (!cfg->jwks_url)
 				goto fail;
 		}
 	}
 
 	if (!cfg->tls.verify_peer)
-		kc_log(state, OAUTH_LOG_WARNING, "tls_verify is off, the identity provider is not authenticated");
+		oidc_log(state, OAUTH_LOG_WARNING, "tls_verify is off, the identity provider is not authenticated");
 
 	cfg->tls.ca_file = cfg->ca_file;
 
 	if (!cfg->introspect) {
-		cfg->jwks = kc_jwks_new(cfg->jwks_url, cfg->jwks_min_refresh, &cfg->tls);
+		cfg->jwks = oidc_jwks_new(cfg->jwks_url, cfg->jwks_min_refresh, &cfg->tls);
 		if (!cfg->jwks) {
-			kc_log(state, OAUTH_LOG_ERROR, "cannot create the JWKS cache");
+			oidc_log(state, OAUTH_LOG_ERROR, "cannot create the JWKS cache");
 			goto fail;
 		}
 	}
@@ -451,7 +258,7 @@ fail:
  */
 static void build_policy(const struct kc_config *cfg, const char *scope,
 			 char ***scratch, int *nscratch,
-			 struct kc_claims_policy *policy)
+			 struct oidc_claims_policy *policy)
 {
 	memset(policy, 0, sizeof(*policy));
 	policy->issuer = cfg->issuer;
@@ -466,7 +273,7 @@ static void build_policy(const struct kc_config *cfg, const char *scope,
 	if (cfg->nscopes > 0) {
 		policy->scopes = cfg->scopes;
 		policy->nscopes = cfg->nscopes;
-	} else if (scope && *scope && split_list(scope, scratch, nscratch)) {
+	} else if (scope && *scope && oidc_split_list(scope, scratch, nscratch)) {
 		policy->scopes = *scratch;
 		policy->nscopes = *nscratch;
 	}
@@ -474,11 +281,11 @@ static void build_policy(const struct kc_config *cfg, const char *scope,
 
 /* Ask Keycloak about the token (RFC 7662). */
 static bool introspect_token(const struct kc_config *cfg, const char *token,
-			     const struct kc_claims_policy *policy, int timeout_ms,
+			     const struct oidc_claims_policy *policy, int timeout_ms,
 			     ValidatorModuleResult *result, bool *internal,
 			     char *errbuf, size_t errlen)
 {
-	struct kc_http_response resp;
+	struct oidc_http_response resp;
 	char *escaped = NULL;
 	char *body = NULL;
 	json_t *doc = NULL;
@@ -489,30 +296,30 @@ static bool introspect_token(const struct kc_config *cfg, const char *token,
 
 	*internal = true;	/* until we have an answer to judge */
 
-	escaped = kc_http_escape(token);
+	escaped = oidc_http_escape(token);
 	if (!escaped) {
 		snprintf(errbuf, errlen, "out of memory");
 		goto out;
 	}
-	body = kc_sprintf("token=%s&token_type_hint=access_token", escaped);
+	body = oidc_sprintf("token=%s&token_type_hint=access_token", escaped);
 	if (!body) {
 		snprintf(errbuf, errlen, "out of memory");
 		goto out;
 	}
 
-	if (!kc_http_post_form(cfg->introspection_url, body,
-			       cfg->client_id, cfg->client_secret,
-			       &cfg->tls, timeout_ms, &resp, errbuf, errlen))
+	if (!oidc_http_post_form(cfg->introspection_url, body,
+				 cfg->client_id, cfg->client_secret,
+				 &cfg->tls, timeout_ms, &resp, errbuf, errlen))
 		goto out;
 
 	if (resp.status != 200) {
 		snprintf(errbuf, errlen, "introspection endpoint returned HTTP %ld", resp.status);
-		kc_http_response_free(&resp);
+		oidc_http_response_free(&resp);
 		goto out;
 	}
 
 	doc = json_loads(resp.body ? resp.body : "", 0, &jerr);
-	kc_http_response_free(&resp);
+	oidc_http_response_free(&resp);
 	if (!doc || !json_is_object(doc)) {
 		snprintf(errbuf, errlen, "introspection response is not a JSON object");
 		goto out;
@@ -535,7 +342,7 @@ static bool introspect_token(const struct kc_config *cfg, const char *token,
 	 * An active token still has to satisfy the same policy as a locally
 	 * verified one: the introspection response carries the same claims.
 	 */
-	if (!kc_claims_check(doc, policy, &authn_id, errbuf, errlen))
+	if (!oidc_claims_check(doc, policy, &authn_id, errbuf, errlen))
 		goto out;
 
 	result->authorized = true;
@@ -555,10 +362,10 @@ static bool kc_validate(ValidatorModuleState *state,
 			int timeout, ValidatorModuleResult *result)
 {
 	struct kc_config *cfg = state->private_data;
-	struct kc_claims_policy policy;
+	struct oidc_claims_policy policy;
 	char **scratch = NULL;
 	int nscratch = 0;
-	char errbuf[KC_ERRLEN] = { 0 };
+	char errbuf[OIDC_ERRLEN] = { 0 };
 	char *authn_id = NULL;
 	bool internal = false;
 	bool ok;
@@ -567,7 +374,7 @@ static bool kc_validate(ValidatorModuleState *state,
 	result->authn_id = NULL;
 
 	if (!cfg) {
-		kc_log(state, OAUTH_LOG_ERROR, "module is not configured");
+		oidc_log(state, OAUTH_LOG_ERROR, "module is not configured");
 		return false;
 	}
 
@@ -578,8 +385,8 @@ static bool kc_validate(ValidatorModuleState *state,
 	 * another; refuse rather than paper over the misconfiguration.
 	 */
 	if (issuer && *issuer && strcmp(issuer, cfg->issuer) != 0) {
-		kc_log(state, OAUTH_LOG_ERROR, "configured issuer \"%s\" does not match the advertised issuer \"%s\"",
-		       cfg->issuer, issuer);
+		oidc_log(state, OAUTH_LOG_ERROR, "configured issuer \"%s\" does not match the advertised issuer \"%s\"",
+			 cfg->issuer, issuer);
 		return false;
 	}
 
@@ -589,8 +396,8 @@ static bool kc_validate(ValidatorModuleState *state,
 		ok = introspect_token(cfg, token, &policy, timeout, result, &internal,
 				      errbuf, sizeof(errbuf));
 	} else {
-		ok = kc_jwt_verify(token, cfg->jwks, &policy, timeout,
-				   &authn_id, &internal, errbuf, sizeof(errbuf));
+		ok = oidc_jwt_verify(token, cfg->jwks, &policy, timeout,
+				     &authn_id, &internal, errbuf, sizeof(errbuf));
 		if (ok) {
 			result->authorized = true;
 			result->authn_id = authn_id;
@@ -605,13 +412,13 @@ static bool kc_validate(ValidatorModuleState *state,
 		 * rejection is routine; being unable to reach the provider is
 		 * an operator problem, so it is louder.
 		 */
-		kc_log(state, internal ? OAUTH_LOG_ERROR : OAUTH_LOG_WARNING,
-		       "%s for user \"%s\": %s",
-		       internal ? "cannot validate token" : "rejected token",
-		       role ? role : "", errbuf);
+		oidc_log(state, internal ? OAUTH_LOG_ERROR : OAUTH_LOG_WARNING,
+			 "%s for user \"%s\": %s",
+			 internal ? "cannot validate token" : "rejected token",
+			 role ? role : "", errbuf);
 	}
 
-	free_list(scratch, nscratch);
+	oidc_free_list(scratch, nscratch);
 
 	return ok;
 }
@@ -622,24 +429,24 @@ static bool kc_validate(ValidatorModuleState *state,
 
 static bool kc_startup(ValidatorModuleState *state)
 {
-	char errbuf[KC_ERRLEN] = { 0 };
+	char errbuf[OIDC_ERRLEN] = { 0 };
 	struct kc_config *cfg;
 
-	if (!kc_http_init(errbuf, sizeof(errbuf))) {
-		kc_log(state, OAUTH_LOG_ERROR, "%s", errbuf);
+	if (!oidc_http_init(errbuf, sizeof(errbuf))) {
+		oidc_log(state, OAUTH_LOG_ERROR, "%s", errbuf);
 		return false;
 	}
 
 	cfg = config_load(state);
 	if (!cfg) {
-		kc_http_fini();
+		oidc_http_fini();
 		return false;
 	}
 
 	state->private_data = cfg;
 
-	kc_log(state, OAUTH_LOG_INFO, "configured for issuer %s (mode=%s)", cfg->issuer,
-	       cfg->introspect ? "introspect" : "jwks");
+	oidc_log(state, OAUTH_LOG_INFO, "configured for issuer %s (mode=%s)", cfg->issuer,
+		 cfg->introspect ? "introspect" : "jwks");
 
 	return true;
 }
@@ -648,7 +455,7 @@ static void kc_shutdown(ValidatorModuleState *state)
 {
 	config_free(state->private_data);
 	state->private_data = NULL;
-	kc_http_fini();
+	oidc_http_fini();
 }
 
 static const OAuthValidatorCallbacks callbacks = {

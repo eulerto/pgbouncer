@@ -1,23 +1,23 @@
 /*
- * Keycloak OAuth validator module for PgBouncer.
+ * Shared OIDC core for PgBouncer's OAuth validator modules.
  *
  * JWT verification and the JWKS cache, plus the claim checks that both
  * validation modes share: an introspection response carries the same claims
  * as the token itself, so it is held to the same policy.
  */
 
-#ifndef KC_JWT_H
-#define KC_JWT_H
+#ifndef OIDC_JWT_H
+#define OIDC_JWT_H
 
 #include <stdbool.h>
 #include <stddef.h>
 
 #include <jansson.h>
 
-#include "kc_http.h"
+#include "oidc_http.h"
 
 /* What a token has to prove before its bearer is let in. */
-struct kc_claims_policy {
+struct oidc_claims_policy {
 	/* Required "iss", or NULL to accept any issuer (not recommended). */
 	const char *issuer;
 
@@ -41,11 +41,11 @@ struct kc_claims_policy {
  * malloc()'d identity in *authn_id (the caller owns it, and hands it to
  * PgBouncer, which frees it).
  */
-bool kc_claims_check(json_t *claims, const struct kc_claims_policy *policy,
-		     char **authn_id, char *errbuf, size_t errlen);
+bool oidc_claims_check(json_t *claims, const struct oidc_claims_policy *policy,
+		       char **authn_id, char *errbuf, size_t errlen);
 
 /* Opaque cache of the provider signing keys. */
-struct kc_jwks_cache;
+struct oidc_jwks_cache;
 
 /*
  * Create a cache for the keys published at url.
@@ -57,9 +57,9 @@ struct kc_jwks_cache;
  * flood of requests to the provider.  It is a rate limit, not a lifetime:
  * making it long delays recovery from a rotation by that much.
  */
-struct kc_jwks_cache *kc_jwks_new(const char *url, int min_refresh,
-				  const struct kc_tls_opts *tls);
-void kc_jwks_free(struct kc_jwks_cache *cache);
+struct oidc_jwks_cache *oidc_jwks_new(const char *url, int min_refresh,
+				      const struct oidc_tls_opts *tls);
+void oidc_jwks_free(struct oidc_jwks_cache *cache);
 
 /*
  * Verify a compact-serialization JWT: signature against the provider keys,
@@ -71,8 +71,8 @@ void kc_jwks_free(struct kc_jwks_cache *cache);
  * set when the token could not be judged at all (no answer from the JWKS
  * endpoint) rather than judged and rejected.
  */
-bool kc_jwt_verify(const char *token, struct kc_jwks_cache *jwks,
-		   const struct kc_claims_policy *policy, int timeout_ms,
-		   char **authn_id, bool *internal, char *errbuf, size_t errlen);
+bool oidc_jwt_verify(const char *token, struct oidc_jwks_cache *jwks,
+		     const struct oidc_claims_policy *policy, int timeout_ms,
+		     char **authn_id, bool *internal, char *errbuf, size_t errlen);
 
 #endif
